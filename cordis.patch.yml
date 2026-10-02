@@ -1,0 +1,20 @@
+# Mounts the issue tracker on top of the shipped Web composition.
+# The Web bundle already provides storage, workspaces, goals, the goal round
+# driver and permission presets, which this plugin depends on.
+
+- insert:
+    - id: dsh-issues
+      name: dsh-issues
+      config:
+        # Preset names must exist in your composition (see the permission and
+        # agent preset tables). `workspace-write` asks for approval on actions
+        # outside the sandbox, which stalls unattended runs until you answer.
+        agentPreset: standard
+        permissionPreset: workspace-write
+        maxConcurrent: 2
+        maxPerProject: 1
+        isolation: auto
+        autoStart: true
+    # Optional web page at /dsh-issues/ (needs the Host web server).
+    - id: dsh-issues-http
+      name: dsh-issues/http

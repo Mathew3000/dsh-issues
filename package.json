@@ -1,0 +1,26 @@
+{
+  "name": "dsh-issues",
+  "version": "0.1.0",
+  "description": "Internal issue tracker for DeepSeek Harness: create issues per project and let agents work on them.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/plugin.mjs",
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "exports": {
+    ".": "./src/plugin.mjs",
+    "./http": "./src/http-plugin.mjs",
+    "./package.json": "./package.json"
+  }
+}
