@@ -89,7 +89,20 @@ To change settings, override the row in your profile's `cordis.patch.yml` (see b
 | `pollSeconds` | 60 | safety-net dispatch interval (0 = off) |
 | `autoMerge` | `false` | default of the Auto-merge checkbox for new issues |
 | `cleanupAfterMerge` | `true` | delete the worktrees and branches after a successful merge |
+| `cleanupOnClose` | `true` | remove the worktree of an issue (and of its finished merge) once the issue is done or cancelled; the branch stays until it is merged |
+| `forgetWorkspaces` | `true` | remove the harness workspace entries of those worktrees; the session logs are kept |
 | `maxMergeRounds` / `maxConcurrentMerges` | 24 / 2 | goal round cap of a merge agent / parallel merges (one per project) |
+
+## Cleanup
+
+Every worktree the tracker creates (one per issue, one per merge) also shows up as a workspace in the harness. A background sweep removes both once they are no longer needed:
+
+- the worktree of an issue that is **done** or **cancelled** (issues in review keep theirs), and the merge worktree of a finished merge;
+- the workspace entries of removed worktrees, so they do not pile up in the workspace list;
+- never while an agent still runs in that workspace, and never a worktree with uncommitted changes (the issue gets a comment instead and the folder stays);
+- branches are not touched here: a branch holds the work until it has been merged.
+
+Reopening an issue creates its worktree again from the same branch. Session logs of removed workspaces are kept by the harness. Set `cleanupOnClose` or `forgetWorkspaces` to `false` to keep things.
 
 ## Scheduling
 

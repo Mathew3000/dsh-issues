@@ -252,3 +252,20 @@ export async function discardMerge({ repo, mergeWorktree, mergeBranch }) {
     await git(['branch', '-D', mergeBranch], { cwd: repo }).catch(() => undefined)
   }
 }
+
+/**
+ * Remove a worktree unless it holds uncommitted work.
+ * @returns {Promise<{ removed: boolean, reason?: string }>}
+ */
+export async function removeWorktreeIfClean({ repo, target }) {
+  if (existsSync(target)) {
+    try {
+      const dirty = await git(['status', '--porcelain', '--untracked-files=normal'], { cwd: target })
+      if (dirty !== '') return { removed: false, reason: 'it has uncommitted changes (commit or discard them, then remove the folder yourself)' }
+    } catch (error) {
+      return { removed: false, reason: `its state could not be read: ${String(error?.message ?? error).split('\n')[0]}` }
+    }
+  }
+  await removeWorktree(repo, target)
+  return existsSync(target) ? { removed: false, reason: 'the folder could not be removed' } : { removed: true }
+}

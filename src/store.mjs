@@ -353,8 +353,26 @@ export class IssueStore {
       }
       if (goalId !== undefined) next.goalId = goalId
       if (branch !== undefined) next.branch = branch
-      if (worktreePath !== undefined) next.worktreePath = worktreePath
+      if (worktreePath !== undefined) {
+        next.worktreePath = worktreePath
+        delete next.worktreeRemoved
+      }
       if (baseBranch !== undefined) next.baseBranch = baseBranch
+      return this.#write(next, 'updated', previous)
+    })
+  }
+
+  /** Remember that the worktree of an issue (`'issue'`) or of its merge (`'merge'`) was removed. */
+  setWorktreeRemoved(id, which) {
+    return this.#serialize(async () => {
+      const previous = this.#require(id)
+      const next = structuredClone(previous)
+      if (which === 'merge') {
+        if (next.merge === undefined) return structuredClone(previous)
+        next.merge.worktreeRemoved = true
+      } else {
+        next.worktreeRemoved = true
+      }
       return this.#write(next, 'updated', previous)
     })
   }

@@ -20,6 +20,8 @@
         # issues; every issue can differ. Conflicts open a follow-up issue.
         autoMerge: false
         cleanupAfterMerge: true
+        cleanupOnClose: true
+        forgetWorkspaces: true
     # Optional web page at /dsh-issues/ (needs the Host web server).
     - id: dsh-issues-http
       name: dsh-issues/http

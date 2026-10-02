@@ -9,6 +9,7 @@ import { zodSchema } from './schema.mjs'
 import { Dispatcher, DEFAULTS } from './dispatcher.mjs'
 import { MergeCoordinator, MERGE_DEFAULTS } from './merge.mjs'
 import * as gitOps from './git.mjs'
+import { Janitor, JANITOR_DEFAULTS } from './janitor.mjs'
 import { assistantText, createSessionsAdapter } from './sessions.mjs'
 import { IssueError, IssueStore, projectKey } from './store.mjs'
 import { createTools } from './tools.mjs'
@@ -47,6 +48,8 @@ export default class IssuesService extends Service {
     pollSeconds: z.number().step(1).min(0).max(86_400).default(60),
     autoMerge: z.boolean().default(false),
     cleanupAfterMerge: z.boolean().default(MERGE_DEFAULTS.cleanupAfterMerge),
+    cleanupOnClose: z.boolean().default(JANITOR_DEFAULTS.cleanupOnClose),
+    forgetWorkspaces: z.boolean().default(JANITOR_DEFAULTS.forgetWorkspaces),
     maxMergeRounds: z.number().step(1).min(1).max(200).default(MERGE_DEFAULTS.maxMergeRounds),
     maxConcurrentMerges: z.number().step(1).min(1).max(8).default(MERGE_DEFAULTS.maxConcurrentMerges),
   })
@@ -57,6 +60,8 @@ export default class IssuesService extends Service {
   dispatcher
   /** @type {MergeCoordinator | undefined} */
   merges
+  /** @type {Janitor | undefined} */
+  janitor
   /** Plain property: cordis calls service methods through a proxy, where `#private` fields are not reachable. */
   config
 
@@ -82,6 +87,7 @@ export default class IssuesService extends Service {
       if (status !== 'idle') return
       void this.dispatcher?.onAgentIdle(String(agent.session.id))
       void this.merges?.onAgentIdle(String(agent.session.id))
+      void this.janitor?.sweep()
     })
 
     this.initialized = ctx.effect(async () => {
@@ -106,6 +112,14 @@ export default class IssuesService extends Service {
           config: { ...config, worktreeRoot: config.worktreeRoot || undefined },
           logger: log,
         })
+        const janitor = new Janitor({
+          store,
+          git: gitOps,
+          workspaces: workspaceAdapter(ctx),
+          config,
+          logger: log,
+        })
+        this.janitor = janitor
         this.store = store
         this.dispatcher = dispatcher
         this.merges = merges
@@ -123,9 +137,10 @@ export default class IssuesService extends Service {
           const wantsMerge = issue.status === 'done' && issue.autoMerge === true && issue.merge === undefined
           const finishedMerge = previous?.merge?.status === 'running' && issue.merge?.status !== 'running'
           if (wantsMerge || finishedMerge) void merges.tick()
+          if (['done', 'cancelled'].includes(issue.status) || finishedMerge) void janitor.sweep()
         })
-        if (config.autoStart && config.pollSeconds > 0) {
-          timer = setInterval(autoStart, config.pollSeconds * 1000)
+        if (config.pollSeconds > 0) {
+          timer = setInterval(() => { autoStart(); void janitor.sweep() }, config.pollSeconds * 1000)
           timer.unref?.()
         }
         const disposers = createTools({
@@ -143,6 +158,8 @@ export default class IssuesService extends Service {
           for (const dispose of disposers) dispose()
           await dispatcher.stop()
           await merges.stop()
+          await janitor.stop()
+          this.janitor = undefined
           this.dispatcher = undefined
           this.merges = undefined
           this.store = undefined
@@ -156,6 +173,7 @@ export default class IssuesService extends Service {
               await merges.resumeInterrupted()
             }
             autoStart()
+            void janitor.sweep()
             void merges.tick()
           } catch (error) {
             log.warn(`dsh-issues: startup recovery failed: ${String(error?.message ?? error)}`)
@@ -225,5 +243,19 @@ export default class IssuesService extends Service {
     }
     if (projects.length === 1) return projects[0]
     throw new IssueError('invalid-input', 'project is required (absolute path or workspace title)')
+  }
+}
+
+/** The harness workspace registry as the janitor needs it. */
+function workspaceAdapter(ctx) {
+  return {
+    list: () => ctx.workspaceRegistry.list().map(workspace => ({ id: workspace.id, path: workspace.path, sessionIds: [...workspace.sessionIds ?? []] })),
+    /** True while an agent of the workspace is running. */
+    busy: workspace => (workspace.sessionIds ?? []).some(sessionId => {
+      const agent = ctx.agents.get(sessionId)
+      return agent !== undefined && agent.status !== 'idle'
+    }),
+    isMissing: async workspace => (await ctx.workspaceRegistry.get(workspace.id)?.status()) === 'missing-dir',
+    remove: id => ctx.workspaceRegistry.delete(id),
   }
 }
