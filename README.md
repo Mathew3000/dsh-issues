@@ -28,7 +28,7 @@ open ──► in_progress ──► needs_review ──► done
 - Restart-safe: interrupted issues are re-attached and their goals re-armed.
 - Model tools for any session: `issue_create`, `issue_list`, `issue_get`, `issue_update`,
   `issue_comment`, `issue_dispatch`. A worker session may only read and comment on its own issue.
-- A web page at `/dsh-issues/` (list, filters, create, accept/reopen/cancel, comment), with an **Issues** link in the header of every session in the main UI.
+- A web page at `/dsh-issues/` with a status-filtered list, a full-size **New issue** dialog (press `N`), Markdown in descriptions and comments (with Write/Preview), accept/reopen/cancel and comments, plus an **Issues** link in the header of every session in the main UI. Markdown is rendered safely: no raw HTML, only http(s)/mailto links, no remote images.
 
 You review the result in the issue's worktree/branch and the linked session, then set the issue to *done*
 (or reopen it with a comment, which sends it round again).
@@ -83,7 +83,7 @@ in a session call `issue_dispatch`.
 
 ## Verification
 
-- `npm test` runs 44 tests: store and state machine, dispatcher, real git worktrees, the HTTP handler,
+- `npm test` runs 52 tests: store and state machine, dispatcher, real git worktrees, the HTTP handler,
   and an integration test that loads the plugin into a real cordis context with the real storage stack
   (agent services faked). The integration test needs the harness; set `DSH_ISSUES_HARNESS_DIR` to run it.
 - Not yet exercised: a full harness boot with a real model. The first real run is the real test; try it
