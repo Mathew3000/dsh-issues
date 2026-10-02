@@ -76,7 +76,7 @@ test('worktree sessions run inside the worktree and keep the project subdirector
   await store.create({ project: path.resolve('/work/repo/packages/app'), title: 'sub' })
   await dispatcher.tick()
   assert.equal(calls.start[0].workspacePath, path.join(REPO, '..', '.wt', 'iss-1', 'packages', 'app'))
-  assert.match(calls.start[0].prompt, /isolated git worktree/)
+  assert.match(calls.start[0].prompt, /private git clone/)
   assert.match(calls.start[0].objective, /ISS-1/)
 })
 

@@ -1,7 +1,7 @@
 /** Git helpers: one worktree and branch per issue. No shell is involved; arguments are passed as an array. */
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { existsSync, statSync } from 'node:fs'
+import { mkdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
@@ -69,8 +69,53 @@ function sameDirectory(a, b) {
   return norm(a) === norm(b)
 }
 
+/** Name a checkout folder must have: `iss-<n>` for an issue, `merge-iss-<n>` for a merge. */
+const CHECKOUT_NAME = /^(merge-)?iss-\d+$/
+
+/** Settings copied from the project so commits made in a clone look like commits made in the project. */
+const COPIED_CONFIG = ['user.name', 'user.email', 'core.autocrlf', 'core.eol']
+
+const LONG = 10 * 60_000
+
+/** One git write into a project repository at a time: parallel fetches into the same ref fail on its lock file. */
+const queues = new Map()
+function serialized(repo, work) {
+  const key = path.resolve(repo)
+  const run = (queues.get(key) ?? Promise.resolve()).catch(() => undefined).then(work)
+  queues.set(key, run)
+  return run.finally(() => { if (queues.get(key) === run) queues.delete(key) })
+}
+
+/** True for a folder created by `git worktree add` (its `.git` is a file that points into the project's `.git`). */
+function isLinkedWorktree(target) {
+  try {
+    return statSync(path.join(target, '.git')).isFile()
+  } catch {
+    return false
+  }
+}
+
 /**
- * Create the worktree for an issue, or reuse the one from an earlier attempt.
+ * Private clone of the project at `sha` with `branch` checked out.
+ *
+ * It is a clone, not a `git worktree`, on purpose: a linked worktree keeps its index, refs and
+ * objects in the project's own `.git`, which lies outside the folder a sandboxed agent may write to,
+ * so every commit would need the user's approval. A clone has a `.git` of its own inside its folder.
+ * Objects are hard-linked where the file system allows it, so it is quick and small.
+ */
+async function cloneAt({ repo, target, sha, branch }) {
+  await git(['clone', '--local', '--no-checkout', '--quiet', repo, target], { timeout: LONG })
+  await git(['checkout', '--quiet', '-b', branch, sha], { cwd: target, timeout: LONG })
+  for (const key of COPIED_CONFIG) {
+    const value = await git(['config', '--get', key], { cwd: repo }).catch(() => '')
+    if (value !== '') await git(['config', key, value], { cwd: target })
+  }
+  // The agent may read the project through `origin` (fetch), but cannot push to it.
+  await git(['remote', 'set-url', '--push', 'origin', 'push-disabled-by-dsh-issues'], { cwd: target })
+}
+
+/**
+ * Create the working copy for an issue, or reuse the one from an earlier attempt.
  * @param {{ repo: string, worktreeRoot?: string, baseRef?: string, issue: { id: string, title: string } }} options
  * @returns {Promise<{ path: string, branch: string, reused: boolean }>}
  */
@@ -79,27 +124,42 @@ export async function ensureWorktree({ repo, worktreeRoot, baseRef = 'HEAD', iss
   const target = path.join(root, issue.id.toLowerCase())
   const branch = branchName(issue)
 
-  const listing = await git(['worktree', 'list', '--porcelain'], { cwd: repo })
-  const known = listing.split(/\r?\n/).filter(line => line.startsWith('worktree ')).map(line => line.slice('worktree '.length))
-  if (known.some(entry => sameDirectory(entry, target))) {
-    if (!existsSync(target)) await git(['worktree', 'prune'], { cwd: repo })
-    else return { path: target, branch, reused: true }
-  }
   if (existsSync(target)) {
-    throw new Error(`worktree path ${target} exists but is not a worktree of ${repo}; remove it or choose another worktreeRoot`)
+    // The checked-out branch wins over the name derived from the current title: the issue may have been renamed.
+    if (isLinkedWorktree(target)) return { path: target, branch: await currentBranch(target) ?? branch, reused: true }
+    const origin = await git(['config', '--get', 'remote.origin.url'], { cwd: target }).catch(() => '')
+    if (origin !== '' && sameDirectory(origin, repo)) return { path: target, branch: await currentBranch(target) ?? branch, reused: true }
+    throw new Error(`${target} exists but is not a checkout of ${repo}; remove it or choose another worktreeRoot`)
   }
-
+  // registrations of older linked worktrees whose folder is gone
+  await git(['worktree', 'prune'], { cwd: repo }).catch(() => undefined)
   await mkdir(root, { recursive: true })
-  let branchExists = true
-  try {
-    await git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repo })
-  } catch {
-    branchExists = false
-  }
-  await git(branchExists
-    ? ['worktree', 'add', target, branch]
-    : ['worktree', 'add', '-b', branch, target, baseRef], { cwd: repo })
+  const start = await exists(repo, `refs/heads/${branch}`) ? `refs/heads/${branch}` : baseRef
+  const sha = await git(['rev-parse', '--verify', `${start}^{commit}`], { cwd: repo })
+  await cloneAt({ repo, target, sha, branch })
   return { path: target, branch, reused: false }
+}
+
+/**
+ * Copy a branch from a working copy into the project's repository, so it can be reviewed and merged there.
+ * Only a fast-forward is accepted unless `force` is set (merge branches are disposable).
+ * A working copy that is gone, or a legacy linked worktree, already shares the project's branches.
+ * @returns {Promise<{ ok: true } | { ok: false, message: string }>}
+ */
+export function importBranch(options) {
+  return serialized(options.repo, () => importNow(options))
+}
+
+async function importNow({ repo, clone, branch, force = false }) {
+  // checked inside the queue: the clone may have been removed by a cleanup that ran first
+  if (clone === undefined || !existsSync(clone) || isLinkedWorktree(clone)) return { ok: true }
+  try {
+    await git(['fetch', '--no-tags', '--quiet', clone, `${force ? '+' : ''}refs/heads/${branch}:refs/heads/${branch}`], { cwd: repo, timeout: LONG })
+    return { ok: true }
+  } catch (error) {
+    const reason = String(error?.stderr ?? error?.message ?? error).trim().split('\n').filter(Boolean).slice(-2).join(' ')
+    return { ok: false, message: `could not copy branch ${branch} from ${clone} into ${repo}: ${reason}` }
+  }
 }
 
 /** Name of the checked-out branch, or undefined for a detached HEAD. */
@@ -136,27 +196,40 @@ export function mergeBranchName(issue) {
 }
 
 /**
- * Fresh worktree for a merge agent: a new branch cut from the current tip of the
- * base branch. Leftovers of an earlier attempt are discarded; they only ever held a merge attempt.
+ * Fresh working copy for a merge agent: a clone with a new branch cut from the current tip of the
+ * base branch, and the issue branch available as a local branch. Leftovers of an earlier attempt are
+ * discarded; they only ever held a merge attempt.
  * @returns {Promise<{ path: string, branch: string }>}
  */
-export async function ensureMergeWorktree({ repo, worktreeRoot, baseBranch, issue }) {
+export async function ensureMergeWorktree({ repo, worktreeRoot, baseBranch, issueBranch, issue }) {
   const root = worktreeRoot ?? path.join(path.dirname(repo), '.dsh-worktrees', path.basename(repo))
   const target = path.join(root, `merge-${issue.id.toLowerCase()}`)
   const branch = mergeBranchName(issue)
-  await removeWorktree(repo, target)
+  await removeCheckout(repo, target)
   if (await exists(repo, `refs/heads/${branch}`)) await git(['branch', '-D', branch], { cwd: repo })
   await mkdir(root, { recursive: true })
-  await git(['worktree', 'add', '-b', branch, target, `refs/heads/${baseBranch}`], { cwd: repo })
+  const sha = await git(['rev-parse', '--verify', `refs/heads/${baseBranch}^{commit}`], { cwd: repo })
+  await cloneAt({ repo, target, sha, branch })
+  if (issueBranch !== undefined) {
+    await git(['fetch', '--no-tags', '--quiet', repo, `refs/heads/${issueBranch}:refs/heads/${issueBranch}`], { cwd: target, timeout: LONG })
+  }
   return { path: target, branch }
 }
 
-async function removeWorktree(repo, target) {
-  try {
-    await git(['worktree', 'remove', '--force', target], { cwd: repo })
-  } catch {
-    // not a registered worktree, or already gone
+/**
+ * Delete a working copy: a clone is removed as a folder, a legacy linked worktree through git.
+ * Only folders the tracker itself names (`iss-<n>`, `merge-iss-<n>`) are ever deleted.
+ */
+async function removeCheckout(repo, target) {
+  if (!CHECKOUT_NAME.test(path.basename(target))) throw new Error(`refusing to delete ${target}: not a folder created by dsh-issues`)
+  if (isLinkedWorktree(target)) {
+    try {
+      await git(['worktree', 'remove', '--force', target], { cwd: repo })
+    } catch {
+      // not a registered worktree, or already gone
+    }
   }
+  await rm(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
   await git(['worktree', 'prune'], { cwd: repo }).catch(() => undefined)
 }
 
@@ -164,9 +237,10 @@ async function removeWorktree(repo, target) {
  * Bring the base branch's newest commits into the merge branch (used when the base moved while the merge agent worked).
  * @returns {Promise<{ ok: true } | { ok: false, files: string[] }>}
  */
-export async function refreshMergeBranch({ mergeWorktree, baseBranch }) {
+export async function refreshMergeBranch({ repo, mergeWorktree, baseBranch }) {
   try {
-    await git(['merge', '--no-edit', `refs/heads/${baseBranch}`], { cwd: mergeWorktree })
+    await git(['fetch', '--no-tags', '--quiet', repo, `refs/heads/${baseBranch}`], { cwd: mergeWorktree, timeout: LONG })
+    await git(['merge', '--no-edit', 'FETCH_HEAD'], { cwd: mergeWorktree })
     return { ok: true }
   } catch {
     let files = []
@@ -186,13 +260,15 @@ export async function refreshMergeBranch({ mergeWorktree, baseBranch }) {
  */
 export async function integrate({ repo, baseBranch, mergeBranch, issueBranch, mergeWorktree }) {
   try {
-    const base = await git(['rev-parse', `refs/heads/${baseBranch}`], { cwd: repo })
-    const merged = await git(['rev-parse', `refs/heads/${mergeBranch}`], { cwd: repo })
-    const issueTip = await git(['rev-parse', `refs/heads/${issueBranch}`], { cwd: repo })
     if (mergeWorktree !== undefined) {
       const dirty = await git(['status', '--porcelain'], { cwd: mergeWorktree })
       if (dirty !== '') return { ok: false, code: 'uncommitted', message: 'The merge worktree has uncommitted changes or an unfinished merge; commit or abort it first.' }
+      const imported = await importBranch({ repo, clone: mergeWorktree, branch: mergeBranch, force: true })
+      if (!imported.ok) return { ok: false, code: 'git-error', message: imported.message }
     }
+    const base = await git(['rev-parse', `refs/heads/${baseBranch}`], { cwd: repo })
+    const merged = await git(['rev-parse', `refs/heads/${mergeBranch}`], { cwd: repo })
+    const issueTip = await git(['rev-parse', `refs/heads/${issueBranch}`], { cwd: repo })
     if (!await isAncestor(repo, issueTip, merged)) {
       return { ok: false, code: 'not-merged', message: `Branch ${mergeBranch} does not contain all commits of ${issueBranch}.` }
     }
@@ -227,7 +303,7 @@ export async function cleanupAfterMerge({ repo, baseBranch, mergeWorktree, merge
   const warnings = []
   for (const target of [mergeWorktree, issueWorktree]) {
     if (target === undefined) continue
-    await removeWorktree(repo, target)
+    await removeCheckout(repo, target).catch(error => warnings.push(String(error?.message ?? error)))
     if (existsSync(target)) warnings.push(`could not remove ${target}`)
   }
   for (const branch of [mergeBranch, issueBranch]) {
@@ -247,25 +323,36 @@ export async function cleanupAfterMerge({ repo, baseBranch, mergeWorktree, merge
 
 /** Remove a merge worktree and its branch without any merge having happened (conflict or failure). */
 export async function discardMerge({ repo, mergeWorktree, mergeBranch }) {
-  if (mergeWorktree !== undefined) await removeWorktree(repo, mergeWorktree)
+  if (mergeWorktree !== undefined) await removeCheckout(repo, mergeWorktree)
   if (mergeBranch !== undefined && await exists(repo, `refs/heads/${mergeBranch}`)) {
     await git(['branch', '-D', mergeBranch], { cwd: repo }).catch(() => undefined)
   }
 }
 
 /**
- * Remove a worktree unless it holds uncommitted work.
+ * Remove a working copy unless it holds uncommitted work. With `branch`, its commits are first
+ * copied into the project's repository; the copy stays when that does not work.
  * @returns {Promise<{ removed: boolean, reason?: string }>}
  */
-export async function removeWorktreeIfClean({ repo, target }) {
-  if (existsSync(target)) {
-    try {
-      const dirty = await git(['status', '--porcelain', '--untracked-files=normal'], { cwd: target })
-      if (dirty !== '') return { removed: false, reason: 'it has uncommitted changes (commit or discard them, then remove the folder yourself)' }
-    } catch (error) {
-      return { removed: false, reason: `its state could not be read: ${String(error?.message ?? error).split('\n')[0]}` }
+export function removeWorktreeIfClean({ repo, target, branch }) {
+  return serialized(repo, async () => {
+    if (existsSync(target)) {
+      try {
+        const dirty = await git(['status', '--porcelain', '--untracked-files=normal'], { cwd: target })
+        if (dirty !== '') return { removed: false, reason: 'it has uncommitted changes (commit or discard them, then remove the folder yourself)' }
+      } catch (error) {
+        return { removed: false, reason: `its state could not be read: ${String(error?.message ?? error).split('\n')[0]}` }
+      }
+      if (branch !== undefined) {
+        const imported = await importNow({ repo, clone: target, branch })
+        if (!imported.ok) return { removed: false, reason: imported.message }
+      }
     }
-  }
-  await removeWorktree(repo, target)
-  return existsSync(target) ? { removed: false, reason: 'the folder could not be removed' } : { removed: true }
+    try {
+      await removeCheckout(repo, target)
+    } catch (error) {
+      return { removed: false, reason: String(error?.message ?? error) }
+    }
+    return existsSync(target) ? { removed: false, reason: 'the folder could not be removed' } : { removed: true }
+  })
 }

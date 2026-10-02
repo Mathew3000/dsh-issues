@@ -34,10 +34,13 @@ function memoryTable() {
 }
 
 /** A store with one issue worked on in a real worktree, plus a fake workspace registry that knows that worktree. */
+let counter = 0
+
 async function setup({ config, busy = false } = {}) {
+  const worktreeRoot = path.join(root, `wt-${counter += 1}`)
   const store = new IssueStore({ table: memoryTable() })
   const issue = await store.create({ project: repo, title: `work ${Math.random()}` })
-  const worktree = await gitOps.ensureWorktree({ repo, worktreeRoot: path.join(root, 'wt'), issue })
+  const worktree = await gitOps.ensureWorktree({ repo, worktreeRoot, issue })
   await store.claim(issue.id)
   await store.attach(issue.id, { sessionId: 's1', branch: worktree.branch, worktreePath: worktree.path, baseBranch: 'main' })
   const registry = [{ id: 'w1', path: worktree.path, sessionIds: ['s1'] }, { id: 'w0', path: repo, sessionIds: [] }]
@@ -53,7 +56,7 @@ async function setup({ config, busy = false } = {}) {
     },
   }
   const janitor = new Janitor({ store, git: gitOps, workspaces, config })
-  return { store, issue, worktree, janitor, removed, state, registry }
+  return { store, issue, worktree, janitor, removed, state, registry, worktreeRoot }
 }
 
 test('a done issue loses its worktree and workspace entry, but keeps its branch', async () => {
@@ -133,10 +136,10 @@ test('the options turn each kind of cleanup off', async () => {
 })
 
 test('a reopened issue gets a fresh worktree that is cleaned up again', async () => {
-  const { store, issue, janitor, removed } = await setup()
+  const { store, issue, janitor, removed, worktreeRoot } = await setup()
   await store.transition(issue.id, 'done', { from: 'in_progress' })
   await janitor.sweep()
-  const again = await gitOps.ensureWorktree({ repo, worktreeRoot: path.join(root, 'wt'), issue })
+  const again = await gitOps.ensureWorktree({ repo, worktreeRoot, issue })
   assert.equal(existsSync(again.path), true)
   await store.attach(issue.id, { worktreePath: again.path })
   assert.equal(store.get(issue.id).worktreeRemoved, undefined)

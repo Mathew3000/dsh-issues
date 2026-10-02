@@ -114,7 +114,10 @@ export class MergeCoordinator {
       if (issue.baseBranch === undefined) return await this.#skip(issue, 'the branch to merge into is unknown (detached HEAD when the work started).')
       repo = await this.#git.repoRoot(issue.project)
       if (repo === undefined) return await this.#skip(issue, `${issue.project} is no longer inside a git repository.`)
-      worktree = await this.#git.ensureMergeWorktree({ repo, worktreeRoot: this.#config.worktreeRoot, baseBranch: issue.baseBranch, issue })
+      // The issue's commits live in its own clone; bring them into the project repository first.
+      const imported = await this.#git.importBranch({ repo, clone: issue.worktreePath, branch: issue.branch })
+      if (!imported.ok) throw new Error(imported.message)
+      worktree = await this.#git.ensureMergeWorktree({ repo, worktreeRoot: this.#config.worktreeRoot, baseBranch: issue.baseBranch, issueBranch: issue.branch, issue })
       const context = { workdir: worktree.path, mergeBranch: worktree.branch, issueBranch: issue.branch, baseBranch: issue.baseBranch, projectPath: issue.project }
       const started = await this.#sessions.start({
         issueId: issue.id,
@@ -180,7 +183,7 @@ export class MergeCoordinator {
     }
     let result = await this.#git.integrate(args)
     if (!result.ok && result.code === 'base-moved') {
-      const refreshed = await this.#git.refreshMergeBranch({ mergeWorktree: args.mergeWorktree, baseBranch: args.baseBranch })
+      const refreshed = await this.#git.refreshMergeBranch({ repo, mergeWorktree: args.mergeWorktree, baseBranch: args.baseBranch })
       if (!refreshed.ok) {
         const files = refreshed.files.length === 0 ? '' : `\n\nConflicting files: ${refreshed.files.map(file => `\`${file}\``).join(', ')}`
         await this.#conflict(issue, {
@@ -247,7 +250,7 @@ export class MergeCoordinator {
         '',
         '---',
         `Follow-up of ${issue.id} (${issue.title}). The accepted work is on branch \`${issue.branch}\`; this issue's branch starts from it.`,
-        `Goal: merge \`${base}\` into your branch, resolve the conflicts so both sides' intent survives, make the tests pass, and commit. Accepting this issue merges everything into \`${base}\` automatically.`,
+        `Goal: bring the latest \`${base}\` into your branch (git fetch origin, then git merge origin/${base}), resolve the conflicts so both sides' intent survives, make the tests pass, and commit. Accepting this issue merges everything into \`${base}\` automatically.`,
       ].join('\n'),
       priority: 'high',
       labels: ['merge-conflict'],

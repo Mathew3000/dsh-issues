@@ -78,7 +78,7 @@ test('plugin wires storage, tools, dispatch and goal events', { skip: harness ==
     const created = JSON.parse(await registered.get('issue_create').execute({ title: 'Fix login', description: 'It crashes', project: 'repo' }, exec))
     assert.equal(created.id, 'ISS-1')
 
-    for (let i = 0; i < 100 && ctx.issues.store.get('ISS-1').status === 'open'; i++) await sleep(50)
+    for (let i = 0; i < 200 && ctx.issues.store.get('ISS-1').sessionId === undefined; i++) await sleep(50)
     const issue = ctx.issues.store.get('ISS-1')
     assert.equal(issue.status, 'in_progress', JSON.stringify(issue))
     assert.equal(issue.branch, 'issue/iss-1-fix-login')
@@ -102,7 +102,7 @@ test('plugin wires storage, tools, dispatch and goal events', { skip: harness ==
     // accepting with auto-merge starts a merge agent; a reported conflict opens a follow-up issue
     await registered.get('issue_update').execute({ id: 'ISS-1', status: 'done', auto_merge: true }, exec)
     for (let i = 0; i < 100 && ctx.issues.store.get('ISS-1').merge?.sessionId === undefined; i++) await sleep(50)
-    assert.equal(ctx.issues.store.get('ISS-1').merge?.status, 'running')
+    assert.equal(ctx.issues.store.get('ISS-1').merge?.status, 'running', JSON.stringify(ctx.issues.store.get('ISS-1').merge))
     assert.ok(ctx.issues.store.get('ISS-1').merge.sessionId)
     const mergeCall = calls.created.at(-1)
     assert.ok(mergeCall.meta.cwd.includes('merge-iss-1'), mergeCall.meta.cwd)

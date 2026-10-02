@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { after, before, test } from 'node:test'
-import { branchName, ensureWorktree, inspectRepo, repoRoot, slugify } from '../src/git.mjs'
+import { branchName, ensureMergeWorktree, ensureWorktree, importBranch, inspectRepo, refreshMergeBranch, removeWorktreeIfClean, repoRoot, slugify } from '../src/git.mjs'
 
 let root
 let repo
@@ -16,7 +16,7 @@ function git(args, cwd = repo) {
 before(() => {
   root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dsh-issues-git-')))
   repo = path.join(root, 'repo')
-  execFileSync('git', ['init', '-q', repo])
+  execFileSync('git', ['init', '-q', '-b', 'main', repo])
   git(['config', 'user.email', 'test@example.com'])
   git(['config', 'user.name', 'Test'])
   writeFileSync(path.join(repo, 'a.txt'), 'hello\n')
@@ -57,28 +57,86 @@ test('ensureWorktree creates a branch worktree and reuses it on the next attempt
   assert.equal(again.path, first.path)
 })
 
-test('ensureWorktree reattaches an existing branch after the worktree was removed', async () => {
+test('ensureWorktree makes a private clone whose git data lives inside its own folder', async () => {
+  const first = await ensureWorktree({ repo, issue: { id: 'ISS-9', title: 'Own git dir' } })
+  assert.ok(statSync(path.join(first.path, '.git')).isDirectory(), 'a real .git folder, not a pointer into the project')
+  assert.equal(git(['config', '--get', 'user.email'], first.path), 'test@example.com')
+  assert.throws(() => git(['push', 'origin', 'HEAD'], first.path), /push-disabled|fatal|does not appear/)
+  // commits only write inside the folder
+  writeFileSync(path.join(first.path, 'new.txt'), 'x\n')
+  git(['add', '.'], first.path)
+  git(['commit', '-q', '-m', 'inside'], first.path)
+  assert.equal(git(['branch', '--list', first.branch]), '', 'the project repository does not see it yet')
+})
+
+test('importBranch copies the clone branch into the project, fast-forward only', async () => {
+  const issue = { id: 'ISS-10', title: 'Import me' }
+  const clone = await ensureWorktree({ repo, issue })
+  writeFileSync(path.join(clone.path, 'f.txt'), '1\n')
+  git(['add', '.'], clone.path)
+  git(['commit', '-q', '-m', 'one'], clone.path)
+  assert.deepEqual(await importBranch({ repo, clone: clone.path, branch: clone.branch }), { ok: true })
+  assert.equal(git(['rev-parse', clone.branch]), git(['rev-parse', 'HEAD'], clone.path))
+  writeFileSync(path.join(clone.path, 'f.txt'), '2\n')
+  git(['commit', '-q', '-am', 'two'], clone.path)
+  assert.deepEqual(await importBranch({ repo, clone: clone.path, branch: clone.branch }), { ok: true })
+  assert.equal(git(['rev-parse', clone.branch]), git(['rev-parse', 'HEAD'], clone.path))
+  // a branch that moved on in the project is refused, not overwritten
+  git(['checkout', '-q', '-b', 'side', 'main'])
+  writeFileSync(path.join(repo, 'side.txt'), 'x\n'); git(['add', '.']); git(['commit', '-q', '-m', 'side'])
+  git(['branch', '-f', clone.branch, 'side']); git(['checkout', '-q', 'main'])
+  writeFileSync(path.join(clone.path, 'f.txt'), '3\n'); git(['commit', '-q', '-am', 'three'], clone.path)
+  const refused = await importBranch({ repo, clone: clone.path, branch: clone.branch })
+  assert.equal(refused.ok, false)
+  assert.match(refused.message, /could not copy branch/)
+  // a missing clone has nothing to import
+  assert.deepEqual(await importBranch({ repo, clone: path.join(root, 'gone'), branch: 'x' }), { ok: true })
+})
+
+test('ensureWorktree starts again from the project branch after the clone was removed', async () => {
   const issue = { id: 'ISS-2', title: 'Second' }
   const first = await ensureWorktree({ repo, issue })
-  git(['worktree', 'remove', '--force', first.path])
+  writeFileSync(path.join(first.path, 'kept.txt'), 'kept\n')
+  git(['add', '.'], first.path)
+  git(['commit', '-q', '-m', 'work'], first.path)
+  const removed = await removeWorktreeIfClean({ repo, target: first.path, branch: first.branch })
+  assert.deepEqual(removed, { removed: true })
+  assert.equal(existsSync(first.path), false)
   const second = await ensureWorktree({ repo, issue })
   assert.equal(second.reused, false)
   assert.equal(git(['rev-parse', '--abbrev-ref', 'HEAD'], second.path), first.branch)
+  assert.ok(existsSync(path.join(second.path, 'kept.txt')), 'the committed work came back')
 })
 
-test('ensureWorktree recovers when the directory vanished without git knowing', async () => {
-  const issue = { id: 'ISS-3', title: 'Third' }
-  const first = await ensureWorktree({ repo, issue })
-  rmSync(first.path, { recursive: true, force: true })
-  const second = await ensureWorktree({ repo, issue })
-  assert.ok(existsSync(path.join(second.path, 'a.txt')))
+test('removeWorktreeIfClean keeps a clone with uncommitted work and refuses foreign folders', async () => {
+  const dirty = await ensureWorktree({ repo, issue: { id: 'ISS-11', title: 'Dirty' } })
+  writeFileSync(path.join(dirty.path, 'wip.txt'), 'x\n')
+  const result = await removeWorktreeIfClean({ repo, target: dirty.path, branch: dirty.branch })
+  assert.equal(result.removed, false)
+  assert.match(result.reason, /uncommitted/)
+  assert.ok(existsSync(dirty.path))
+  const foreign = path.join(root, 'important')
+  execFileSync('git', ['init', '-q', foreign])
+  const refused = await removeWorktreeIfClean({ repo, target: foreign })
+  assert.equal(refused.removed, false)
+  assert.match(refused.reason, /not a folder created by dsh-issues/)
+  assert.ok(existsSync(foreign))
 })
 
-test('ensureWorktree refuses a foreign directory at the target path', async () => {
-  const issue = { id: 'ISS-4', title: 'Fourth' }
-  const target = path.join(root, '.dsh-worktrees', 'repo', 'iss-4')
-  execFileSync('git', ['init', '-q', target])
-  await assert.rejects(ensureWorktree({ repo, issue }), /not a worktree of/)
+test('a merge clone starts at the base branch, holds the issue branch, and can pick up newer base commits', async () => {
+  const issue = { id: 'ISS-12', title: 'Merge me' }
+  const work = await ensureWorktree({ repo, issue })
+  writeFileSync(path.join(work.path, 'm.txt'), 'issue\n')
+  git(['add', '.'], work.path); git(['commit', '-q', '-m', 'issue work'], work.path)
+  await importBranch({ repo, clone: work.path, branch: work.branch })
+  const merge = await ensureMergeWorktree({ repo, baseBranch: 'main', issueBranch: work.branch, issue })
+  assert.ok(statSync(path.join(merge.path, '.git')).isDirectory())
+  assert.equal(git(['rev-parse', '--abbrev-ref', 'HEAD'], merge.path), 'merge/iss-12')
+  assert.equal(git(['rev-parse', work.branch], merge.path), git(['rev-parse', work.branch]))
+  writeFileSync(path.join(repo, 'later.txt'), 'x\n')
+  git(['add', '.']); git(['commit', '-q', '-m', 'main moved on'])
+  assert.deepEqual(await refreshMergeBranch({ repo, mergeWorktree: merge.path, baseBranch: 'main' }), { ok: true })
+  assert.ok(existsSync(path.join(merge.path, 'later.txt')))
 })
 
 test('ensureWorktree honors worktreeRoot and baseRef', async () => {

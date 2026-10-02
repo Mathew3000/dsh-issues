@@ -31,7 +31,7 @@ export class Janitor {
   /**
    * @param {object} options
    * @param {import('./store.mjs').IssueStore} options.store
-   * @param {{ repoRoot(dir: string): Promise<string | undefined>, removeWorktreeIfClean(options: { repo: string, target: string }): Promise<{ removed: boolean, reason?: string }> }} options.git
+   * @param {{ repoRoot(dir: string): Promise<string | undefined>, removeWorktreeIfClean(options: { repo: string, target: string, branch?: string }): Promise<{ removed: boolean, reason?: string }> }} options.git
    * @param {{ list(): Array<{ id: string, path: string }>, busy(workspace: { id: string, path: string }): boolean, remove(id: string): Promise<unknown>, isMissing(workspace: { id: string, path: string }): Promise<boolean> }} options.workspaces
    * @param {Partial<typeof JANITOR_DEFAULTS>} [options.config]
    * @param {{ info?: Function, warn?: Function }} [options.logger]
@@ -85,11 +85,11 @@ export class Janitor {
       for (const issue of issues) {
         if (!['done', 'cancelled'].includes(issue.status)) continue
         if (issue.worktreePath !== undefined && !issue.worktreeRemoved) {
-          await this.#remove(issue, issue.worktreePath, 'the issue worktree', () => this.#store.setWorktreeRemoved(issue.id, 'issue'))
+          await this.#remove(issue, issue.worktreePath, issue.branch, 'the issue worktree', () => this.#store.setWorktreeRemoved(issue.id, 'issue'))
         }
         const merge = issue.merge
         if (merge?.worktreePath !== undefined && merge.status !== 'running' && !merge.worktreeRemoved) {
-          await this.#remove(issue, merge.worktreePath, 'the merge worktree', () => this.#store.setWorktreeRemoved(issue.id, 'merge'))
+          await this.#remove(issue, merge.worktreePath, undefined, 'the merge worktree', () => this.#store.setWorktreeRemoved(issue.id, 'merge'))
         }
       }
     }
@@ -110,13 +110,13 @@ export class Janitor {
     }
   }
 
-  async #remove(issue, target, what, mark) {
+  async #remove(issue, target, branch, what, mark) {
     const workspace = this.#workspaceAt(target)
     if (workspace !== undefined && this.#workspaces.busy(workspace)) return
     if (existsSync(target)) {
       const repo = await this.#git.repoRoot(issue.project)
       if (repo === undefined) return
-      const result = await this.#git.removeWorktreeIfClean({ repo, target })
+      const result = await this.#git.removeWorktreeIfClean({ repo, target, branch })
       if (!result.removed) {
         const key = `${issue.id}:${target}`
         if (!this.#warned.has(key)) {

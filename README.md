@@ -3,7 +3,7 @@
 **An issue tracker for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) that hands issues to agents.**
 
 Create an issue with a description for a project, like on GitHub or GitLab. The tracker starts an
-agent session for it in its own git worktree, the agent works until its goal is complete,
+agent session for it in its own private git clone, the agent works until its goal is complete,
 and the issue lands in **needs review**.
 
 ```
@@ -21,7 +21,7 @@ open ──► in_progress ──► needs_review ──► done
 - Issues per project (`ISS-1`, `ISS-2`, …) with title, description, priority, labels, comments.
 - Status flow: `open → in_progress → needs_review → done`, plus `blocked` and `cancelled`.
 - A dispatcher that starts a session per open issue (limits: `maxConcurrent`, `maxPerProject`),
-  using a **git worktree and branch per issue** (`issue/iss-12-short-title`) so parallel work
+  using a **private git clone and branch per issue** (`issue/iss-12-short-title`) so parallel work
   never collides and nothing touches your main checkout. Non-git projects run one issue at a time in place.
 - The session gets a goal, so the agent keeps going over several rounds until it
   completes the goal or reports a blocker. Its closing message is stored as a comment.
@@ -30,7 +30,7 @@ open ──► in_progress ──► needs_review ──► done
   `issue_comment`, `issue_dispatch`. A worker session may only read and comment on its own issue.
 - A web page at `/dsh-issues/` with a status-filtered list, a full-size **New issue** dialog (press `N`), Markdown in descriptions and comments (with Write/Preview), accept/reopen/cancel and comments, and an **Issues** entry in the harness sidebar, below *Plugins* and *Automation tasks*, that opens the tracker inside the harness window in the harness theme (light/dark follows the harness setting). The same page also works on its own at `/dsh-issues/`. Markdown is rendered safely: no raw HTML, only http(s)/mailto links, no remote images.
 
-You review the result in the issue's worktree/branch and the linked session, then set the issue to *done*
+You review the result on the issue's branch (copied into your repository when the agent finishes) and the linked session, then set the issue to *done*
 (or reopen it with a comment, which sends it round again).
 
 ## Auto-merge
@@ -38,7 +38,7 @@ You review the result in the issue's worktree/branch and the linked session, the
 Tick **Auto-merge** on an issue (or turn on the default with `autoMerge: true`) and accepting the issue
 starts a small *merge agent*. You can also press **Merge now** on any accepted issue that has a branch.
 
-1. The agent works in its own throwaway worktree on `merge/iss-N`, cut from the current tip of the base branch
+1. The agent works in its own throwaway clone on `merge/iss-N`, cut from the current tip of the base branch
    (the branch your repo had checked out when the work started). It merges the issue branch, resolves only conflicts
    whose correct result is clear, runs the project's checks and commits.
 2. It reports `ready` or `conflict` with the `issue_merge_report` tool.
@@ -78,8 +78,8 @@ To change settings, override the row in your profile's `cordis.patch.yml` (see b
 | `agentPreset` | `standard` | agent preset for worker sessions |
 | `permissionPreset` | `workspace-write` | permission preset; **asks** before actions outside the sandbox, so unattended runs stall until you answer. `danger-full-access` never asks – use only in a throwaway environment |
 | `maxConcurrent` / `maxPerProject` | 2 / 1 | parallel sessions overall / per project |
-| `isolation` | `worktree` | `worktree` = every issue gets its own git worktree and branch, and an issue is blocked (with the git error) if that is impossible; `auto` = worktree for git projects, in place (no branch, one issue at a time) for non-git folders; `none` = always in place |
-| `worktreeRoot` | next to the repo in `.dsh-worktrees/<repo>/` | where worktrees go |
+| `isolation` | `worktree` | `worktree` = every issue gets its own private clone and branch, and an issue is blocked (with the git error) if that is impossible; `auto` = clone for git projects, in place (no branch, one issue at a time) for non-git folders; `none` = always in place |
+| `worktreeRoot` | next to the repo in `.dsh-worktrees/<repo>/` | where the clones go |
 | `baseRef` | `HEAD` | what new issue branches start from |
 | `maxGoalRounds` | 64 | round cap of the goal |
 | `maxAttempts` | 3 | start failures before an issue is blocked |
@@ -102,7 +102,7 @@ Every worktree the tracker creates (one per issue, one per merge) also shows up 
 - never while an agent still runs in that workspace, and never a worktree with uncommitted changes (the issue gets a comment instead and the folder stays);
 - branches are not touched here: a branch holds the work until it has been merged.
 
-Reopening an issue creates its worktree again from the same branch. Session logs of removed workspaces are kept by the harness. Set `cleanupOnClose` or `forgetWorkspaces` to `false` to keep things.
+Reopening an issue creates its clone again from the same branch. Session logs of removed workspaces are kept by the harness. Set `cleanupOnClose` or `forgetWorkspaces` to `false` to keep things.
 
 ## Scheduling
 
@@ -115,11 +115,12 @@ in a session call `issue_dispatch`.
 - Issue text is passed to the agent as quoted data with working rules, but it is still
   model input: only let people you trust create issues.
 - Agents work with the permission preset above. The tracker never pushes. It only merges when an issue has Auto-merge on (or you press Merge now), and never forces anything.
-- Git commits in a linked worktree write into the main repository's `.git` folder, which is outside the agent's workspace. Depending on the harness sandbox this may need an approval the first time; watch the first run.
+- **Why clones and not `git worktree`:** a linked worktree keeps its index, refs and objects in the main repository's `.git`, outside the folder a sandboxed agent may write to, so every commit asks the user for approval (`Unable to create '.git/worktrees/…/index.lock': Operation not permitted`). A clone has its own `.git` inside its folder, so the agent can commit with the default `workspace-write` sandbox and no prompts. Objects are hard-linked where the file system allows it, so a clone is quick and small. The tracker copies the branch into your repository (fast-forward only) when the agent finishes and before merging; the clone cannot push (`origin` is read-only for the agent). Worktrees created by earlier versions keep working.
+- A clone has no submodules checked out and none of your repository's local hooks; install dependencies in the clone as usage requires.
 
 ## Verification
 
-- `npm test` runs 70 tests: store and state machine, dispatcher, real git worktrees, the HTTP handler,
+- `npm test` runs 86 tests: store and state machine, dispatcher, real git clones, the HTTP handler,
   and an integration test that loads the plugin into a real cordis context with the real storage stack
   (agent services faked). The integration test needs the harness; set `DSH_ISSUES_HARNESS_DIR` to run it.
 - Not yet exercised: a full harness boot with a real model. The first real run is the real test; try it

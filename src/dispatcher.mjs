@@ -41,7 +41,7 @@ export class Dispatcher {
    * @param {object} options
    * @param {import('./store.mjs').IssueStore} options.store
    * @param {{ start(request: object): Promise<{ sessionId: string, goalId?: string }>, resume(sessionId: string, options: { rearm: boolean }): Promise<object>, halt(sessionId: string): Promise<void> }} options.sessions
-   * @param {{ repoRoot(dir: string): Promise<string | undefined>, ensureWorktree(options: object): Promise<{ path: string, branch: string }> }} options.git
+   * @param {{ repoRoot(dir: string): Promise<string | undefined>, ensureWorktree(options: object): Promise<{ path: string, branch: string }>, importBranch?(options: object): Promise<{ ok: boolean, message?: string }> }} options.git
    * @param {Partial<typeof DEFAULTS> & { worktreeRoot?: string, baseRef?: string }} [options.config]
    * @param {{ info?: Function, warn?: Function }} [options.logger]
    */
@@ -287,12 +287,31 @@ export class Dispatcher {
     const issue = this.#store.bySession(sessionId)
     if (issue === undefined || !this.#pendingSummary.has(issue.id)) return
     this.#pendingSummary.delete(issue.id)
+    await this.#publishBranch(issue)
     const summary = this.#lastText.get(sessionId)
     if (summary === undefined) return
     try {
       await this.#store.addComment(issue.id, { author: 'agent', text: summary.slice(0, SUMMARY_LIMIT) })
     } catch (error) {
       this.#log.warn?.(`dsh-issues: could not store the summary of ${issue.id}: ${describe(error)}`)
+    }
+  }
+
+  /**
+   * The agent commits in its own clone; copy the branch into the project repository so it can be
+   * looked at and merged there. A problem is reported on the issue, the clone keeps the work.
+   */
+  async #publishBranch(issue) {
+    if (issue.branch === undefined || issue.worktreePath === undefined || this.#git.importBranch === undefined) return
+    try {
+      const repo = await this.#git.repoRoot(issue.project)
+      if (repo === undefined) return
+      const result = await this.#git.importBranch({ repo, clone: issue.worktreePath, branch: issue.branch })
+      if (!result.ok) {
+        await this.#store.addComment(issue.id, { author: 'system', text: `The branch could not be copied into the project repository yet: ${result.message}. The work is safe in ${issue.worktreePath}.` })
+      }
+    } catch (error) {
+      this.#log.warn?.(`dsh-issues: could not publish the branch of ${issue.id}: ${describe(error)}`)
     }
   }
 
