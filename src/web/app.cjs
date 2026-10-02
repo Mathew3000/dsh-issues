@@ -3,7 +3,7 @@
   var BASE = location.pathname.replace(/\/+$/, '');
   var STATUSES = ['open', 'in_progress', 'blocked', 'needs_review', 'done', 'cancelled'];
   var LABEL = { open: 'Open', in_progress: 'In progress', blocked: 'Blocked', needs_review: 'Needs review', done: 'Done', cancelled: 'Cancelled' };
-  var state = { projects: [], issues: [], project: '', status: '', selected: null, drafts: {}, detailStamp: '' };
+  var state = { defaults: {}, projects: [], issues: [], project: '', status: '', selected: null, drafts: {}, detailStamp: '' };
   var $ = function (sel) { return document.querySelector(sel); };
 
   function h(tag, props) {
@@ -68,6 +68,10 @@
     return known ? known.title : String(path).replace(/[\\/]+$/, '').split(/[\\/]/).pop();
   }
   function badge(status) { return h('span', { class: 'badge s-' + status }, LABEL[status] || status); }
+  var MERGE_LABEL = { running: 'Merging', merged: 'Merged', conflict: 'Merge conflict', failed: 'Merge failed', skipped: 'Merge skipped' };
+  function mergeBadge(issue) {
+    return issue.merge ? h('span', { class: 'badge m-' + issue.merge.status }, MERGE_LABEL[issue.merge.status] || issue.merge.status) : null;
+  }
   function current() { return state.issues.filter(function (i) { return i.id === state.selected; })[0]; }
 
   /* ---------- markdown editor with Write / Preview ---------- */
@@ -101,13 +105,15 @@
     var editing = issue !== undefined;
     var title = h('input', { type: 'text', class: 'title-input', placeholder: 'Short summary', maxlength: '200', required: true, 'aria-label': 'Title', value: editing ? issue.title : '' });
     var description = mdEditor({
-      label: 'Description', rows: 12, minHeight: 280, value: editing ? issue.description : '',
+      label: 'Description', rows: 10, minHeight: 210, value: editing ? issue.description : '',
       placeholder: 'What is wrong or wanted? How can it be reproduced? What does done look like?\n\nMarkdown works: **bold**, `code`, lists, ``` code blocks ```, links.'
     });
     var priority = h('select', { 'aria-label': 'Priority' }, ['low', 'normal', 'high'].map(function (p) {
       var o = h('option', { value: p }, p.charAt(0).toUpperCase() + p.slice(1)); if (p === (editing ? issue.priority : 'normal')) o.selected = true; return o;
     }));
     var labels = h('input', { type: 'text', placeholder: 'bug, ui, ...', 'aria-label': 'Labels', value: editing ? (issue.labels || []).join(', ') : '' });
+    var autoMerge = h('input', { type: 'checkbox', id: 'auto-merge' });
+    autoMerge.checked = editing ? issue.autoMerge === true : state.defaults.autoMerge === true;
 
     var projectField = null, projectSelect = null, pathInput = null;
     if (!editing) {
@@ -131,7 +137,10 @@
         h('div', { class: 'field' }, h('div', { class: 'lbl' }, 'Description', h('span', { class: 'sub' }, 'what the agent will work from')), description.el),
         h('div', { class: 'grid2' },
           h('div', { class: 'field' }, h('label', {}, 'Priority'), priority),
-          h('div', { class: 'field' }, h('label', {}, 'Labels', h('span', { class: 'sub' }, 'comma-separated')), labels))),
+          h('div', { class: 'field' }, h('label', {}, 'Labels', h('span', { class: 'sub' }, 'comma-separated')), labels)),
+        h('label', { class: 'check', for: 'auto-merge' }, autoMerge,
+          h('span', {}, h('b', {}, 'Auto-merge'), ' after I accept it',
+            h('span', { class: 'sub block' }, 'A small merge agent merges the issue branch into the base branch. If that is not possible it opens a follow-up issue instead.')))),
       h('div', { class: 'dlg-foot' },
         h('span', { class: 'hint' }, 'Ctrl/Cmd + Enter to ' + (editing ? 'save' : 'create')),
         h('button', { type: 'button', onclick: function () { dialog.close(); } }, 'Cancel'),
@@ -145,10 +154,10 @@
       if (!title.value.trim()) { title.focus(); say('A title is required.'); return; }
       submit.disabled = true;
       var request = editing
-        ? api('/issues/' + issue.id, 'PATCH', { title: title.value, description: description.value(), priority: priority.value, labels: labels.value })
+        ? api('/issues/' + issue.id, 'PATCH', { title: title.value, description: description.value(), priority: priority.value, labels: labels.value, autoMerge: autoMerge.checked })
         : api('/issues', 'POST', {
           project: projectSelect.value || pathInput.value.trim(), title: title.value,
-          description: description.value(), priority: priority.value, labels: labels.value
+          description: description.value(), priority: priority.value, labels: labels.value, autoMerge: autoMerge.checked
         });
       request.then(function (data) {
         say(editing ? 'Saved ' + data.issue.id : 'Created ' + data.issue.id, 'ok');
@@ -190,7 +199,7 @@
     replace(list, items.map(function (issue) {
       return h('button', { type: 'button', class: 'row' + (issue.id === state.selected ? ' sel' : ''), onclick: function () { select(issue.id); } },
         h('div', { class: 't' }, h('span', { class: 'id' }, issue.id), h('span', {}, issue.title)),
-        h('div', { class: 'm' }, badge(issue.status),
+        h('div', { class: 'm' }, badge(issue.status), mergeBadge(issue),
           issue.priority === 'high' ? h('span', { class: 'prio-high' }, 'High') : null,
           state.project ? null : h('span', {}, projectTitle(issue.project)),
           h('span', { title: abs(issue.updatedAt) }, ago(issue.updatedAt))));
@@ -216,6 +225,24 @@
     buttons.push(h('button', { onclick: function () { openEditor(issue); } }, 'Edit'));
     if (['open', 'in_progress', 'blocked', 'needs_review'].indexOf(issue.status) >= 0) buttons.push(h('button', { class: 'danger', onclick: function () { act('cancelled'); } }, 'Cancel issue'));
 
+    var patch = function (body) { return api('/issues/' + issue.id, 'PATCH', body).then(function () { return refresh(); }).catch(fail); };
+    var merge = issue.merge;
+    var mergeBox = null;
+    var branchInfo = issue.branch && issue.baseBranch;
+    if (merge) {
+      var follow = merge.followUpId ? h('button', { type: 'button', class: 'link', onclick: function () { select(merge.followUpId); } }, merge.followUpId) : null;
+      var text = merge.status === 'running' ? ['A merge agent is merging ', h('code', {}, issue.branch), ' into ', h('code', {}, merge.baseBranch || issue.baseBranch), '.']
+        : merge.status === 'merged' ? [merge.message || 'Merged.']
+        : merge.status === 'conflict' ? ['Merging was not possible automatically. Follow-up issue ', follow, ' was opened.']
+        : [merge.message || 'The merge did not run.'];
+      mergeBox = h('div', { class: 'merge m-' + merge.status },
+        h('div', { class: 'merge-text' }, h('b', {}, (MERGE_LABEL[merge.status] || merge.status) + ': '), text),
+        ['conflict', 'failed', 'skipped'].indexOf(merge.status) >= 0 && issue.status === 'done' && branchInfo ? h('button', { type: 'button', onclick: function () { patch({ autoMerge: true }); } }, 'Retry merge') : null);
+    } else if (issue.status === 'done' && branchInfo) {
+      mergeBox = h('div', { class: 'merge' },
+        h('div', { class: 'merge-text' }, 'Not merged yet. Branch ', h('code', {}, issue.branch), ' can be merged into ', h('code', {}, issue.baseBranch), ' by a merge agent.'),
+        h('button', { type: 'button', class: 'primary', onclick: function () { patch({ autoMerge: true }); } }, 'Merge now'));
+    }
     var description = h('div', { class: 'card md' });
     if (issue.description && issue.description.trim()) Markdown.render(document, description, issue.description);
     else { description.className = 'card muted'; description.textContent = 'No description.'; }
@@ -248,8 +275,11 @@
           h('span', {}, 'Priority: ', h('b', { class: issue.priority === 'high' ? 'prio-high' : '' }, issue.priority)),
           h('span', {}, 'Project: ', h('b', { title: issue.project }, projectTitle(issue.project))),
           (issue.labels || []).map(function (l) { return h('span', { class: 'tag' }, l); }),
+          issue.autoMerge ? h('span', { class: 'tag' }, 'auto-merge') : null,
+          issue.mergeOf ? h('span', {}, 'resolves merge of ', h('button', { type: 'button', class: 'link', onclick: function () { select(issue.mergeOf); } }, issue.mergeOf)) : null,
           h('span', { title: abs(issue.createdAt) }, 'opened ' + ago(issue.createdAt)))),
       h('div', { class: 'actions' }, buttons),
+      mergeBox,
       issue.blockedReason ? h('div', { class: 'banner' }, h('b', {}, 'Blocked: '), issue.blockedReason.message, ' ', h('code', {}, issue.blockedReason.code)) : null,
       description,
       work.length ? h('div', { class: 'work' }, work) : null,
@@ -298,6 +328,7 @@
     state.selected = /^#(ISS-\d+)$/i.test(location.hash) ? location.hash.slice(1).toUpperCase() : null;
     api('/projects').then(function (data) {
       state.projects = data.projects;
+      state.defaults = data.defaults || {};
       var select = $('#f-project');
       select.replaceChildren(h('option', { value: '' }, 'All projects'));
       state.projects.forEach(function (p) { select.append(h('option', { value: p.path }, p.title)); });

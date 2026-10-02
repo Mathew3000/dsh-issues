@@ -15,6 +15,11 @@
         maxPerProject: 1
         isolation: auto
         autoStart: true
+        # Auto-merge: once an issue is accepted, a small merge agent merges its
+        # branch into the base branch. This is the default of the checkbox on new
+        # issues; every issue can differ. Conflicts open a follow-up issue.
+        autoMerge: false
+        cleanupAfterMerge: true
     # Optional web page at /dsh-issues/ (needs the Host web server).
     - id: dsh-issues-http
       name: dsh-issues/http

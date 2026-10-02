@@ -69,11 +69,12 @@ function projectList(known, issueProjects) {
  * @param {import('./dispatcher.mjs').Dispatcher} deps.dispatcher
  * @param {() => Array<string | { path: string, title?: string }>} deps.projects known projects
  * @param {{ admit(req: object): unknown }} deps.connection
+ * @param {() => { autoMerge?: boolean }} [deps.defaults] defaults for new issues
  * @param {string} [deps.basePath]
  * @param {{ warn?: Function }} [deps.logger]
  * @returns {(req: object, res: object) => Promise<void>}
  */
-export function createHandler({ store, dispatcher, projects, connection, basePath = '/dsh-issues', logger = {} }) {
+export function createHandler({ store, dispatcher, projects, defaults = () => ({}), connection, basePath = '/dsh-issues', logger = {} }) {
   const deps = { store, dispatcher }
 
   async function route(req, res, url) {
@@ -95,7 +96,7 @@ export function createHandler({ store, dispatcher, projects, connection, basePat
     const mutating = method !== 'GET'
 
     if (segments[0] === 'projects' && segments.length === 1 && !mutating) {
-      return sendJson(res, 200, { projects: projectList(projects(), store.list({ limit: 10000 }).map(issue => issue.project)) })
+      return sendJson(res, 200, { projects: projectList(projects(), store.list({ limit: 10000 }).map(issue => issue.project)), defaults: defaults() })
     }
     if (segments[0] === 'issues' && segments.length === 1) {
       if (method === 'GET') {
@@ -118,6 +119,7 @@ export function createHandler({ store, dispatcher, projects, connection, basePat
           description: body.description,
           priority: body.priority,
           labels: body.labels,
+          autoMerge: typeof body.autoMerge === 'boolean' ? body.autoMerge : defaults().autoMerge === true,
         })
         return sendJson(res, 201, { issue })
       }
@@ -131,8 +133,8 @@ export function createHandler({ store, dispatcher, projects, connection, basePat
       }
       if (method === 'PATCH') {
         const body = await readJson(req)
-        const { title, description, priority, labels, status, comment } = body
-        return sendJson(res, 200, { issue: await updateIssue(deps, id, { title, description, priority, labels, status, comment }) })
+        const { title, description, priority, labels, autoMerge, status, comment } = body
+        return sendJson(res, 200, { issue: await updateIssue(deps, id, { title, description, priority, labels, autoMerge, status, comment }) })
       }
     }
     if (segments[0] === 'issues' && segments[2] === 'comments' && segments.length === 3 && method === 'POST') {

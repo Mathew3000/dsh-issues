@@ -82,3 +82,154 @@ export async function ensureWorktree({ repo, worktreeRoot, baseRef = 'HEAD', iss
     : ['worktree', 'add', '-b', branch, target, baseRef], { cwd: repo })
   return { path: target, branch, reused: false }
 }
+
+/** Name of the checked-out branch, or undefined for a detached HEAD. */
+export async function currentBranch(repo) {
+  try {
+    const name = await git(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: repo })
+    return name === '' ? undefined : name
+  } catch {
+    return undefined
+  }
+}
+
+async function exists(repo, ref) {
+  try {
+    await git(['rev-parse', '--verify', '--quiet', ref], { cwd: repo })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function isAncestor(repo, ancestor, descendant) {
+  try {
+    await git(['merge-base', '--is-ancestor', ancestor, descendant], { cwd: repo })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Branch the merge agent builds the merge on, e.g. `merge/iss-12`. */
+export function mergeBranchName(issue) {
+  return `merge/${issue.id.toLowerCase()}`
+}
+
+/**
+ * Fresh worktree for a merge agent: a new branch cut from the current tip of the
+ * base branch. Leftovers of an earlier attempt are discarded; they only ever held a merge attempt.
+ * @returns {Promise<{ path: string, branch: string }>}
+ */
+export async function ensureMergeWorktree({ repo, worktreeRoot, baseBranch, issue }) {
+  const root = worktreeRoot ?? path.join(path.dirname(repo), '.dsh-worktrees', path.basename(repo))
+  const target = path.join(root, `merge-${issue.id.toLowerCase()}`)
+  const branch = mergeBranchName(issue)
+  await removeWorktree(repo, target)
+  if (await exists(repo, `refs/heads/${branch}`)) await git(['branch', '-D', branch], { cwd: repo })
+  await mkdir(root, { recursive: true })
+  await git(['worktree', 'add', '-b', branch, target, `refs/heads/${baseBranch}`], { cwd: repo })
+  return { path: target, branch }
+}
+
+async function removeWorktree(repo, target) {
+  try {
+    await git(['worktree', 'remove', '--force', target], { cwd: repo })
+  } catch {
+    // not a registered worktree, or already gone
+  }
+  await git(['worktree', 'prune'], { cwd: repo }).catch(() => undefined)
+}
+
+/**
+ * Bring the base branch's newest commits into the merge branch (used when the base moved while the merge agent worked).
+ * @returns {Promise<{ ok: true } | { ok: false, files: string[] }>}
+ */
+export async function refreshMergeBranch({ mergeWorktree, baseBranch }) {
+  try {
+    await git(['merge', '--no-edit', `refs/heads/${baseBranch}`], { cwd: mergeWorktree })
+    return { ok: true }
+  } catch {
+    let files = []
+    try {
+      files = (await git(['diff', '--name-only', '--diff-filter=U'], { cwd: mergeWorktree })).split(/\r?\n/).filter(Boolean)
+    } catch { /* keep empty */ }
+    await git(['merge', '--abort'], { cwd: mergeWorktree }).catch(() => undefined)
+    return { ok: false, files }
+  }
+}
+
+/**
+ * Move the base branch to the finished merge, fast-forward only. Nothing is forced:
+ * a checked-out base branch is advanced with `merge --ff-only` (which refuses to overwrite local changes),
+ * any other base branch with a compare-and-set `update-ref`.
+ * @returns {Promise<{ ok: true, sha: string, changed: boolean } | { ok: false, code: string, message: string }>}
+ */
+export async function integrate({ repo, baseBranch, mergeBranch, issueBranch, mergeWorktree }) {
+  try {
+    const base = await git(['rev-parse', `refs/heads/${baseBranch}`], { cwd: repo })
+    const merged = await git(['rev-parse', `refs/heads/${mergeBranch}`], { cwd: repo })
+    const issueTip = await git(['rev-parse', `refs/heads/${issueBranch}`], { cwd: repo })
+    if (mergeWorktree !== undefined) {
+      const dirty = await git(['status', '--porcelain'], { cwd: mergeWorktree })
+      if (dirty !== '') return { ok: false, code: 'uncommitted', message: 'The merge worktree has uncommitted changes or an unfinished merge; commit or abort it first.' }
+    }
+    if (!await isAncestor(repo, issueTip, merged)) {
+      return { ok: false, code: 'not-merged', message: `Branch ${mergeBranch} does not contain all commits of ${issueBranch}.` }
+    }
+    if (merged === base) return { ok: true, sha: base, changed: false }
+    if (!await isAncestor(repo, base, merged)) {
+      return { ok: false, code: 'base-moved', message: `${baseBranch} gained new commits since the merge branch was created.` }
+    }
+    if (await currentBranch(repo) === baseBranch) {
+      try {
+        await git(['merge', '--ff-only', merged], { cwd: repo })
+      } catch (error) {
+        return { ok: false, code: 'ff-failed', message: `Could not fast-forward the checked-out ${baseBranch}: ${String(error?.stderr ?? error?.message ?? error).trim().split('\n')[0]}` }
+      }
+    } else {
+      try {
+        await git(['update-ref', `refs/heads/${baseBranch}`, merged, base], { cwd: repo })
+      } catch (error) {
+        return { ok: false, code: 'ff-failed', message: `Could not update ${baseBranch}: ${String(error?.stderr ?? error?.message ?? error).trim().split('\n')[0]}` }
+      }
+    }
+    return { ok: true, sha: merged, changed: true }
+  } catch (error) {
+    return { ok: false, code: 'git-error', message: String(error?.stderr ?? error?.message ?? error).trim() }
+  }
+}
+
+/**
+ * Remove merge leftovers. A branch is only deleted when its tip is contained in the base branch.
+ * @returns {Promise<string[]>} warnings for steps that did not work
+ */
+export async function cleanupAfterMerge({ repo, baseBranch, mergeWorktree, mergeBranch, issueWorktree, issueBranch }) {
+  const warnings = []
+  for (const target of [mergeWorktree, issueWorktree]) {
+    if (target === undefined) continue
+    await removeWorktree(repo, target)
+    if (existsSync(target)) warnings.push(`could not remove ${target}`)
+  }
+  for (const branch of [mergeBranch, issueBranch]) {
+    if (branch === undefined || !await exists(repo, `refs/heads/${branch}`)) continue
+    if (!await isAncestor(repo, `refs/heads/${branch}`, `refs/heads/${baseBranch}`)) {
+      warnings.push(`kept branch ${branch}: not contained in ${baseBranch}`)
+      continue
+    }
+    try {
+      await git(['branch', '-D', branch], { cwd: repo })
+    } catch (error) {
+      warnings.push(`could not delete branch ${branch}: ${String(error?.message ?? error).split('\n')[0]}`)
+    }
+  }
+  return warnings
+}
+
+/** Remove a merge worktree and its branch without any merge having happened (conflict or failure). */
+export async function discardMerge({ repo, mergeWorktree, mergeBranch }) {
+  if (mergeWorktree !== undefined) await removeWorktree(repo, mergeWorktree)
+  if (mergeBranch !== undefined && await exists(repo, `refs/heads/${mergeBranch}`)) {
+    await git(['branch', '-D', mergeBranch], { cwd: repo }).catch(() => undefined)
+  }
+}

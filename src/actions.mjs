@@ -8,7 +8,7 @@ export const REQUESTABLE_STATUSES = Object.freeze(['open', 'done', 'cancelled'])
  * Apply edits, a status change and a comment to one issue.
  * @param {{ store: import('./store.mjs').IssueStore, dispatcher: import('./dispatcher.mjs').Dispatcher }} deps
  * @param {string} id
- * @param {{ title?: string, description?: string, priority?: string, labels?: string | string[], status?: string, comment?: string }} change
+ * @param {{ title?: string, description?: string, priority?: string, labels?: string | string[], autoMerge?: boolean, status?: string, comment?: string }} change
  */
 export async function updateIssue({ store, dispatcher }, id, change) {
   let issue = store.get(id)
@@ -16,6 +16,10 @@ export async function updateIssue({ store, dispatcher }, id, change) {
   const { status, comment, ...edits } = change
   if (status !== undefined && !REQUESTABLE_STATUSES.includes(status)) {
     throw new IssueError('invalid-input', `status must be one of ${REQUESTABLE_STATUSES.join(', ')}`)
+  }
+  // Turning auto-merge on again after a failed or skipped merge starts a new attempt.
+  if (edits.autoMerge === true && issue.status === 'done' && ['conflict', 'failed', 'skipped'].includes(issue.merge?.status)) {
+    issue = await store.setMerge(id, undefined, { comment: 'Merge retried on request.' })
   }
   if (Object.values(edits).some(value => value !== undefined)) issue = await store.update(id, edits)
   if (status !== undefined) {

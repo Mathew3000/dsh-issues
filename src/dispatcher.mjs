@@ -133,11 +133,13 @@ export class Dispatcher {
       let workdir = issue.project
       let branch
       let worktreePath
+      let baseBranch
       if (plan.mode === 'worktree') {
+        baseBranch = issue.baseBranch ?? await this.#git.currentBranch?.(plan.repo)
         const worktree = await this.#git.ensureWorktree({
           repo: plan.repo,
           worktreeRoot: this.#config.worktreeRoot,
-          baseRef: this.#config.baseRef,
+          baseRef: issue.baseRef ?? this.#config.baseRef,
           issue,
         })
         branch = worktree.branch
@@ -152,7 +154,7 @@ export class Dispatcher {
         objective: goalObjective(issue, { branch, isolation: plan.mode }),
         maxGoalRounds: this.#config.maxGoalRounds,
       })
-      await this.#store.attach(issue.id, { sessionId: started.sessionId, goalId: started.goalId, branch, worktreePath })
+      await this.#store.attach(issue.id, { sessionId: started.sessionId, goalId: started.goalId, branch, worktreePath, baseBranch })
       await this.#store.addComment(issue.id, {
         author: 'system',
         text: `Session ${started.sessionId} started${branch === undefined ? '' : ` on branch ${branch}`}.`,

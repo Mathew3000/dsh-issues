@@ -11,6 +11,7 @@ export function apply(ctx) {
     store: ctx.issues.store,
     dispatcher: ctx.issues.dispatcher,
     projects: () => ctx.issues.listProjectInfo(),
+    defaults: () => ctx.issues.defaults(),
     connection: ctx.connection,
     basePath: BASE,
     logger: ctx.logger,

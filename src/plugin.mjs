@@ -7,6 +7,7 @@ import path from 'node:path'
 import { cordis, schemastery as z, storageDomain, tools as toolkit } from './harness.mjs'
 import { zodSchema } from './schema.mjs'
 import { Dispatcher, DEFAULTS } from './dispatcher.mjs'
+import { MergeCoordinator, MERGE_DEFAULTS } from './merge.mjs'
 import * as gitOps from './git.mjs'
 import { assistantText, createSessionsAdapter } from './sessions.mjs'
 import { IssueError, IssueStore, projectKey } from './store.mjs'
@@ -44,12 +45,18 @@ export default class IssuesService extends Service {
     autoStart: z.boolean().default(true),
     resumeOnStart: z.boolean().default(DEFAULTS.resumeOnStart),
     pollSeconds: z.number().step(1).min(0).max(86_400).default(60),
+    autoMerge: z.boolean().default(false),
+    cleanupAfterMerge: z.boolean().default(MERGE_DEFAULTS.cleanupAfterMerge),
+    maxMergeRounds: z.number().step(1).min(1).max(200).default(MERGE_DEFAULTS.maxMergeRounds),
+    maxConcurrentMerges: z.number().step(1).min(1).max(8).default(MERGE_DEFAULTS.maxConcurrentMerges),
   })
 
   /** @type {IssueStore | undefined} */
   store
   /** @type {Dispatcher | undefined} */
   dispatcher
+  /** @type {MergeCoordinator | undefined} */
+  merges
   #config
 
   constructor(ctx, config) {
@@ -59,15 +66,21 @@ export default class IssuesService extends Service {
 
     // Events can arrive before storage is open; they are no-ops until then.
     ctx.on('goal/changed', ({ agent, change }) => {
-      void this.dispatcher?.onGoalChanged({ sessionId: String(agent.session.id), change })
+      const sessionId = String(agent.session.id)
+      void this.dispatcher?.onGoalChanged({ sessionId, change })
+      void this.merges?.onGoalChanged({ sessionId, change })
     })
     ctx.on('session/event', (session, event) => {
       if (this.dispatcher === undefined || event?.type !== 'assistant/message') return
       const text = assistantText(event.data?.message)
-      if (text !== undefined) this.dispatcher.onAssistantMessage(String(session.id), text)
+      if (text === undefined) return
+      this.dispatcher.onAssistantMessage(String(session.id), text)
+      this.merges?.onAssistantMessage(String(session.id), text)
     })
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle') void this.dispatcher?.onAgentIdle(String(agent.session.id))
+      if (status !== 'idle') return
+      void this.dispatcher?.onAgentIdle(String(agent.session.id))
+      void this.merges?.onAgentIdle(String(agent.session.id))
     })
 
     this.initialized = ctx.effect(async () => {
@@ -84,14 +97,31 @@ export default class IssuesService extends Service {
           config: { ...config, worktreeRoot: config.worktreeRoot || undefined },
           logger: log,
         })
+        const sessions = createSessionsAdapter(ctx, config)
+        const merges = new MergeCoordinator({
+          store,
+          sessions,
+          git: gitOps,
+          config: { ...config, worktreeRoot: config.worktreeRoot || undefined },
+          logger: log,
+        })
         this.store = store
         this.dispatcher = dispatcher
+        this.merges = merges
 
-        const autoStart = () => { if (config.autoStart) void dispatcher.tick() }
+        const autoStart = () => {
+          if (!config.autoStart) return
+          void dispatcher.tick()
+          void merges.tick()
+        }
         const offChange = store.onChange(({ type, issue, previous }) => {
           const queued = issue.status === 'open' && previous?.status !== 'open'
           const freed = previous?.status === 'in_progress' && issue.status !== 'in_progress'
           if (type === 'created' || queued || freed) autoStart()
+          // Merges are not held back by autoStart: accepting an issue with auto-merge is an explicit request.
+          const wantsMerge = issue.status === 'done' && issue.autoMerge === true && issue.merge === undefined
+          const finishedMerge = previous?.merge?.status === 'running' && issue.merge?.status !== 'running'
+          if (wantsMerge || finishedMerge) void merges.tick()
         })
         if (config.autoStart && config.pollSeconds > 0) {
           timer = setInterval(autoStart, config.pollSeconds * 1000)
@@ -101,6 +131,8 @@ export default class IssuesService extends Service {
           defineTool,
           store,
           dispatcher,
+          merges,
+          defaults: () => this.defaults(),
           resolveProject: (input, caller) => this.resolveProject(input, caller),
         }).map(tool => ctx.tools.register(tool))
 
@@ -109,15 +141,21 @@ export default class IssuesService extends Service {
           offChange()
           for (const dispose of disposers) dispose()
           await dispatcher.stop()
+          await merges.stop()
           this.dispatcher = undefined
+          this.merges = undefined
           this.store = undefined
           await domain.close()
         })
         // Pick up work that was interrupted by a restart, then anything waiting.
         void (async () => {
           try {
-            if (config.resumeOnStart) await dispatcher.resumeInterrupted()
+            if (config.resumeOnStart) {
+              await dispatcher.resumeInterrupted()
+              await merges.resumeInterrupted()
+            }
             autoStart()
+            void merges.tick()
           } catch (error) {
             log.warn(`dsh-issues: startup recovery failed: ${String(error?.message ?? error)}`)
           }
@@ -133,6 +171,11 @@ export default class IssuesService extends Service {
 
   async [Service.init]() {
     await this.initialized
+  }
+
+  /** Defaults the web page applies to new issues. */
+  defaults() {
+    return { autoMerge: this.#config.autoMerge === true }
   }
 
   /** Projects with their display titles. */

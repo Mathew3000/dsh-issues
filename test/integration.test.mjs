@@ -72,7 +72,7 @@ test('plugin wires storage, tools, dispatch and goal events', { skip: harness ==
 
     await ctx.plugin(Plugin, { pollSeconds: 0, resumeOnStart: false })
     assert.deepEqual([...registered.keys()].sort(),
-      ['issue_comment', 'issue_create', 'issue_dispatch', 'issue_get', 'issue_list', 'issue_update'])
+      ['issue_comment', 'issue_create', 'issue_dispatch', 'issue_get', 'issue_list', 'issue_merge_report', 'issue_update'])
 
     const exec = { agent: { session: { id: 'human-session' } }, signal: new AbortController().signal }
     const created = JSON.parse(await registered.get('issue_create').execute({ title: 'Fix login', description: 'It crashes', project: 'repo' }, exec))
@@ -97,7 +97,24 @@ test('plugin wires storage, tools, dispatch and goal events', { skip: harness ==
     assert.equal(finished.status, 'needs_review')
     assert.equal(finished.comments.at(-1).text, 'Fixed it.')
 
-    // a worker session may not create issues
+    // accepting with auto-merge starts a merge agent; a reported conflict opens a follow-up issue
+    await registered.get('issue_update').execute({ id: 'ISS-1', status: 'done', auto_merge: true }, exec)
+    for (let i = 0; i < 100 && ctx.issues.store.get('ISS-1').merge?.status !== 'running'; i++) await sleep(50)
+    assert.equal(ctx.issues.store.get('ISS-1').merge?.status, 'running')
+    const mergeCall = calls.created.at(-1)
+    assert.ok(mergeCall.meta.cwd.includes('merge-iss-1'), mergeCall.meta.cwd)
+    agent.session.id = mergeCall.sessionId
+    const reported = await registered.get('issue_merge_report').execute({
+      outcome: 'conflict', summary: 'both edited x', follow_up_title: 'Fix merge', follow_up_description: 'resolve x',
+    }, { ...exec, agent })
+    assert.match(reported, /follow-up issue/)
+    assert.equal(ctx.issues.store.get('ISS-1').merge.status, 'conflict')
+    assert.equal(ctx.issues.store.get('ISS-2').mergeOf, 'ISS-1')
+    await assert.rejects(registered.get('issue_merge_report').execute({ outcome: 'ready', summary: 's' }, exec), /Only the merge agent/)
+
+    // sessions of the tracker (workers and the finished merge agent) may not create issues
+    await sleep(200)
+    agent.session.id = mergeCall.sessionId
     await assert.rejects(registered.get('issue_create').execute({ title: 'x' }, { ...exec, agent }), /may only read and comment|forbidden|works on/)
   } finally {
     await ctx.fiber.dispose()

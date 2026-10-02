@@ -86,6 +86,11 @@ function labelsOf(value) {
   return labels
 }
 
+function optionalRef(value, field) {
+  if (value === undefined || value === null || value === '') return {}
+  return { [field]: text(value, field, { min: 1, max: 200 }) }
+}
+
 function projectOf(value) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new IssueError('invalid-input', 'project must be a non-empty absolute path')
@@ -237,6 +242,10 @@ export class IssueStore {
         labels: labelsOf(input.labels),
         attempts: 0,
         failedStarts: 0,
+        autoMerge: input.autoMerge === true,
+        ...optionalRef(input.baseRef, 'baseRef'),
+        ...optionalRef(input.baseBranch, 'baseBranch'),
+        ...input.mergeOf === undefined ? {} : { mergeOf: parseIssueId(input.mergeOf) },
         comments: [],
         createdAt: now,
         updatedAt: now,
@@ -247,7 +256,7 @@ export class IssueStore {
     })
   }
 
-  /** Edit title, description, priority or labels. */
+  /** Edit title, description, priority, labels or the auto-merge flag. */
   update(id, patch) {
     return this.#serialize(async () => {
       const previous = this.#require(id)
@@ -260,6 +269,11 @@ export class IssueStore {
       }
       if (patch.priority !== undefined) { next.priority = priorityOf(patch.priority); changed = true }
       if (patch.labels !== undefined) { next.labels = labelsOf(patch.labels); changed = true }
+      if (patch.autoMerge !== undefined) {
+        if (typeof patch.autoMerge !== 'boolean') throw new IssueError('invalid-input', 'autoMerge must be true or false')
+        next.autoMerge = patch.autoMerge
+        changed = true
+      }
       if (!changed) throw new IssueError('invalid-input', 'nothing to update')
       if (previous.status === 'in_progress') {
         this.#withComment(next, 'system', 'Issue was edited while a session is working on it; the running agent was not notified.')
@@ -304,6 +318,7 @@ export class IssueStore {
       if (to === 'open') {
         delete next.sessionId
         delete next.goalId
+        delete next.merge
       }
       this.#withComment(next, 'system', `Status: ${previous.status} → ${to}${to === 'blocked' ? ` (${next.blockedReason.message})` : ''}`)
       if (comment !== undefined && comment.trim() !== '') this.#withComment(next, author, text(comment, 'comment', { min: 1, max: MAX_TEXT }))
@@ -328,7 +343,7 @@ export class IssueStore {
   }
 
   /** Record the session, goal, branch and worktree that work on an issue. */
-  attach(id, { sessionId, goalId, branch, worktreePath }) {
+  attach(id, { sessionId, goalId, branch, worktreePath, baseBranch }) {
     return this.#serialize(async () => {
       const previous = this.#require(id)
       const next = structuredClone(previous)
@@ -339,6 +354,60 @@ export class IssueStore {
       if (goalId !== undefined) next.goalId = goalId
       if (branch !== undefined) next.branch = branch
       if (worktreePath !== undefined) next.worktreePath = worktreePath
+      if (baseBranch !== undefined) next.baseBranch = baseBranch
+      return this.#write(next, 'updated', previous)
+    })
+  }
+
+  /** Done issues that want to be merged and have not started yet. */
+  mergeQueue() {
+    return [...this.#issues.values()]
+      .filter(issue => issue.status === 'done' && issue.autoMerge === true && issue.merge === undefined)
+      .sort((a, b) => a.number - b.number)
+      .map(issue => structuredClone(issue))
+  }
+
+  /**
+   * The issue whose merge agent ran (or, with `running`, is still running) in this session.
+   * @param {string} sessionId
+   * @param {{ running?: boolean }} [options]
+   */
+  byMergeSession(sessionId, { running = false } = {}) {
+    for (const issue of this.#issues.values()) {
+      if (issue.merge?.sessionId !== sessionId) continue
+      if (running && issue.merge.status !== 'running') continue
+      return structuredClone(issue)
+    }
+    return undefined
+  }
+
+  /**
+   * Compare-and-set start of a merge: only a done, auto-merge issue without a merge qualifies.
+   * @returns {Promise<object | undefined>} the issue, or undefined when it is no longer eligible
+   */
+  claimMerge(id) {
+    return this.#serialize(async () => {
+      const previous = this.#require(id)
+      if (previous.status !== 'done' || previous.autoMerge !== true || previous.merge !== undefined) return undefined
+      const next = structuredClone(previous)
+      next.merge = { status: 'running', startedAt: this.#iso() }
+      return this.#write(next, 'updated', previous)
+    })
+  }
+
+  /**
+   * Record the merge state of an issue; `undefined` clears it so the merge can run again.
+   * @param {string} id
+   * @param {object | undefined} merge `{ status: running|merged|conflict|failed|skipped, ... }`
+   * @param {{ comment?: string, author?: string }} [options]
+   */
+  setMerge(id, merge, { comment, author = 'system' } = {}) {
+    return this.#serialize(async () => {
+      const previous = this.#require(id)
+      const next = structuredClone(previous)
+      if (merge === undefined) delete next.merge
+      else next.merge = { ...merge, updatedAt: this.#iso() }
+      if (comment !== undefined && comment.trim() !== '') this.#withComment(next, author, text(comment, 'comment', { min: 1, max: MAX_TEXT }))
       return this.#write(next, 'updated', previous)
     })
   }

@@ -173,3 +173,32 @@ test('unknown issues raise not-found', async () => {
 test('projectKey ignores trailing separators', () => {
   assert.equal(projectKey(PROJECT + path.sep), projectKey(PROJECT))
 })
+
+test('auto-merge flag, merge state and reopening', async () => {
+  const { store } = makeStore()
+  const created = await store.create({ project: PROJECT, title: 'm', autoMerge: true, baseRef: 'issue/iss-1-x', baseBranch: 'main', mergeOf: '#1' })
+  assert.equal(created.autoMerge, true)
+  assert.equal(created.baseRef, 'issue/iss-1-x')
+  assert.equal(created.mergeOf, 'ISS-1')
+  assert.equal((await store.create({ project: PROJECT, title: 'plain' })).autoMerge, false)
+  await assert.rejects(store.update(created.id, { autoMerge: 'yes' }), { code: 'invalid-input' })
+  assert.equal((await store.update(created.id, { autoMerge: false })).autoMerge, false)
+  await store.update(created.id, { autoMerge: true })
+
+  assert.equal(await store.claimMerge(created.id), undefined) // not done yet
+  await store.claim(created.id)
+  await store.transition(created.id, 'done')
+  assert.deepEqual(store.mergeQueue().map(issue => issue.id), [created.id])
+  const claimed = await store.claimMerge(created.id)
+  assert.equal(claimed.merge.status, 'running')
+  assert.equal(await store.claimMerge(created.id), undefined) // only once
+  assert.deepEqual(store.mergeQueue(), [])
+  await store.setMerge(created.id, { status: 'running', sessionId: 's1' })
+  assert.equal(store.byMergeSession('s1').id, created.id)
+  await store.setMerge(created.id, { status: 'merged', sessionId: 's1' }, { comment: 'done' })
+  assert.equal(store.byMergeSession('s1', { running: true }), undefined)
+  assert.equal(store.byMergeSession('s1').id, created.id) // the session stays restricted to its issue
+  assert.equal(store.get(created.id).comments.at(-1).text, 'done')
+  const reopened = await store.transition(created.id, 'open')
+  assert.equal(reopened.merge, undefined)
+})

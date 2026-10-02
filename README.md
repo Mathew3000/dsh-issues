@@ -33,6 +33,25 @@ open ──► in_progress ──► needs_review ──► done
 You review the result in the issue's worktree/branch and the linked session, then set the issue to *done*
 (or reopen it with a comment, which sends it round again).
 
+## Auto-merge
+
+Tick **Auto-merge** on an issue (or turn on the default with `autoMerge: true`) and accepting the issue
+starts a small *merge agent*. You can also press **Merge now** on any accepted issue that has a branch.
+
+1. The agent works in its own throwaway worktree on `merge/iss-N`, cut from the current tip of the base branch
+   (the branch your repo had checked out when the work started). It merges the issue branch, resolves only conflicts
+   whose correct result is clear, runs the project's checks and commits.
+2. It reports `ready` or `conflict` with the `issue_merge_report` tool.
+3. On `ready` the tracker itself verifies the result (the merge contains the issue branch, the worktree is clean, the
+   base branch can be fast-forwarded), moves the base branch **fast-forward only** (never forced; a checked-out base
+   branch with local changes in the way makes the merge fail cleanly instead), and deletes the merge branch and the
+   issue's worktree and branch. If the base branch moved meanwhile, the tracker merges it in first.
+4. On `conflict` (or if the agent stops without reporting), nothing in your base branch changes. A **new high-priority issue**
+   is opened that starts from the issue's branch, says what has to be resolved and is auto-merge itself. When that one merges, the
+   original issue is marked merged too.
+
+The merge agent never pushes. Only one merge per project runs at a time. Issues without a branch (non-git projects) are skipped.
+
 ## Install
 
 ```
@@ -68,6 +87,9 @@ To change settings, override the row in your profile's `cordis.patch.yml` (see b
 | `autoStart` | `true` | start waiting issues automatically; `false` = only via `issue_dispatch`/the UI button |
 | `resumeOnStart` | `true` | re-attach interrupted issues on startup |
 | `pollSeconds` | 60 | safety-net dispatch interval (0 = off) |
+| `autoMerge` | `false` | default of the Auto-merge checkbox for new issues |
+| `cleanupAfterMerge` | `true` | delete the worktrees and branches after a successful merge |
+| `maxMergeRounds` / `maxConcurrentMerges` | 24 / 2 | goal round cap of a merge agent / parallel merges (one per project) |
 
 ## Scheduling
 
@@ -79,11 +101,12 @@ in a session call `issue_dispatch`.
 
 - Issue text is passed to the agent as quoted data with working rules, but it is still
   model input: only let people you trust create issues.
-- Agents work with the permission preset above; review branches before merging. The tracker never merges or pushes.
+- Agents work with the permission preset above. The tracker never pushes. It only merges when an issue has Auto-merge on (or you press Merge now), and never forces anything.
+- Git commits in a linked worktree write into the main repository's `.git` folder, which is outside the agent's workspace. Depending on the harness sandbox this may need an approval the first time; watch the first run.
 
 ## Verification
 
-- `npm test` runs 52 tests: store and state machine, dispatcher, real git worktrees, the HTTP handler,
+- `npm test` runs 70 tests: store and state machine, dispatcher, real git worktrees, the HTTP handler,
   and an integration test that loads the plugin into a real cordis context with the real storage stack
   (agent services faked). The integration test needs the harness; set `DSH_ISSUES_HARNESS_DIR` to run it.
 - Not yet exercised: a full harness boot with a real model. The first real run is the real test; try it

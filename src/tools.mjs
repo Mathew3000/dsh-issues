@@ -43,15 +43,17 @@ const OUTPUT = {
  * @param {Function} deps.defineTool `defineTool` from `@deepseek-ai/dsh-tools`
  * @param {import('./store.mjs').IssueStore} deps.store
  * @param {import('./dispatcher.mjs').Dispatcher} deps.dispatcher
+ * @param {() => { autoMerge?: boolean }} [deps.defaults] defaults for new issues
  * @param {(input: string | undefined, callerSessionId: string | undefined) => string} deps.resolveProject
  * @returns {object[]} tool definitions
  */
-export function createTools({ defineTool, store, dispatcher, resolveProject }) {
+export function createTools({ defineTool, store, dispatcher, merges, defaults, resolveProject }) {
   const callerOf = exec => exec.agent?.session?.id
+  const workerIssue = exec => callerOf(exec) === undefined ? undefined : store.bySession(callerOf(exec)) ?? store.byMergeSession(callerOf(exec))
 
   /** Reject mutations from worker sessions, except on-topic reads and comments. */
   function guardWorker(exec, { id, allowOwn = false }) {
-    const own = callerOf(exec) === undefined ? undefined : store.bySession(callerOf(exec))
+    const own = workerIssue(exec)
     if (own === undefined) return
     if (allowOwn && id !== undefined && own.id === store.get(id)?.id) return
     throw new IssueError('forbidden', `This session works on ${own.id}; it may only read and comment on that issue.`)
@@ -67,12 +69,13 @@ export function createTools({ defineTool, store, dispatcher, resolveProject }) {
         project: { type: 'string', description: 'Project title or absolute path. Defaults to the project of the current session.' },
         priority: { type: 'string', description: 'low, normal (default) or high.' },
         labels: { type: 'string', description: 'Comma-separated labels.' },
+        auto_merge: { type: 'boolean', description: 'Merge the branch automatically once the issue is accepted.' },
       },
       output: OUTPUT,
       async execute(args, exec) {
         guardWorker(exec, {})
         const project = resolveProject(args.project, callerOf(exec))
-        const issue = await store.create({ project, title: args.title, description: args.description, priority: args.priority, labels: args.labels })
+        const issue = await store.create({ project, title: args.title, description: args.description, priority: args.priority, labels: args.labels, autoMerge: typeof args.auto_merge === 'boolean' ? args.auto_merge : defaults?.().autoMerge === true })
         return JSON.stringify(brief(issue))
       },
     }),
@@ -118,13 +121,14 @@ export function createTools({ defineTool, store, dispatcher, resolveProject }) {
         priority: { type: 'string', description: 'low, normal or high.' },
         labels: { type: 'string', description: 'Comma-separated labels; replaces the current ones.' },
         status: { type: 'string', description: MODEL_STATUS_TARGETS.join(', ') },
+        auto_merge: { type: 'boolean', description: 'Merge the issue branch automatically once the issue is done.' },
         comment: { type: 'string', description: 'Optional comment recorded with the change.' },
       },
       output: OUTPUT,
       async execute(args, exec) {
         guardWorker(exec, { id: args.id })
-        const { id, ...change } = args
-        const issue = await updateIssue({ store, dispatcher }, id, change)
+        const { id, auto_merge: autoMerge, ...change } = args
+        const issue = await updateIssue({ store, dispatcher }, id, { ...change, autoMerge })
         return JSON.stringify(brief(issue))
       },
     }),
@@ -138,9 +142,30 @@ export function createTools({ defineTool, store, dispatcher, resolveProject }) {
       output: OUTPUT,
       async execute(args, exec) {
         guardWorker(exec, { id: args.id, allowOwn: true })
-        const own = callerOf(exec) === undefined ? undefined : store.bySession(callerOf(exec))
+        const own = workerIssue(exec)
         const issue = await store.addComment(args.id, { author: own === undefined ? 'user' : 'agent', text: args.text })
         return JSON.stringify(brief(issue))
+      },
+    }),
+    defineTool({
+      name: 'issue_merge_report',
+      description: 'Only for merge agents: report the result of merging an accepted issue. "ready" means the merge is committed on your merge branch and the checks pass. "conflict" means it could not be merged safely; a follow-up issue is opened from follow_up_title and follow_up_description.',
+      parameters: {
+        outcome: { type: 'string', required: true, description: 'ready or conflict.' },
+        summary: { type: 'string', required: true, description: 'What was merged and which checks ran, or why it could not be merged.' },
+        follow_up_title: { type: 'string', description: 'Title of the follow-up issue (conflict only).' },
+        follow_up_description: { type: 'string', description: 'Precise task for the follow-up issue: files, what each side intended, failing output (conflict only).' },
+      },
+      output: OUTPUT,
+      async execute(args, exec) {
+        const issue = callerOf(exec) === undefined ? undefined : store.byMergeSession(callerOf(exec))
+        if (issue === undefined) throw new IssueError('forbidden', 'Only the merge agent of an issue can report a merge result.')
+        return await merges.report(issue.id, {
+          outcome: args.outcome,
+          summary: args.summary,
+          followUpTitle: args.follow_up_title,
+          followUpDescription: args.follow_up_description,
+        })
       },
     }),
     defineTool({
