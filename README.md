@@ -28,7 +28,7 @@ open ──► in_progress ──► needs_review ──► done
 - Restart-safe: interrupted issues are re-attached and their goals re-armed.
 - Model tools for any session: `issue_create`, `issue_list`, `issue_get`, `issue_update`,
   `issue_comment`, `issue_dispatch`. A worker session may only read and comment on its own issue.
-- A web page at `/dsh-issues/` (list, filters, create, accept/reopen/cancel, comment).
+- A web page at `/dsh-issues/` (list, filters, create, accept/reopen/cancel, comment), with an **Issues** link in the header of every session in the main UI.
 
 You review the result in the issue's worktree/branch and the linked session, then set the issue to *done*
 (or reopen it with a comment, which sends it round again).

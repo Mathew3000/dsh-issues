@@ -10,7 +10,7 @@ export function apply(ctx) {
   const handler = createHandler({
     store: ctx.issues.store,
     dispatcher: ctx.issues.dispatcher,
-    projects: () => ctx.issues.listProjects(),
+    projects: () => ctx.issues.listProjectInfo(),
     connection: ctx.connection,
     basePath: BASE,
     logger: ctx.logger,

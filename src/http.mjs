@@ -1,5 +1,7 @@
 /** HTTP surface of the tracker: one HTML page plus a small JSON API under one prefix. */
 import { randomBytes } from 'node:crypto'
+import { statSync } from 'node:fs'
+import path from 'node:path'
 import { updateIssue } from './actions.mjs'
 import { renderPage } from './page.mjs'
 import { IssueError, STATUSES } from './store.mjs'
@@ -39,11 +41,33 @@ async function readJson(req) {
   return value
 }
 
+function isDirectory(value) {
+  try {
+    return path.isAbsolute(value) && statSync(value).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function baseName(value) {
+  return String(value).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(value)
+}
+
+/** Projects as `{ path, title }`, from paths or objects, without duplicates. */
+function projectList(known, issueProjects) {
+  const byPath = new Map()
+  for (const entry of [...known, ...issueProjects]) {
+    const info = typeof entry === 'string' ? { path: entry, title: baseName(entry) } : { path: entry.path, title: entry.title || baseName(entry.path) }
+    if (!byPath.has(info.path)) byPath.set(info.path, info)
+  }
+  return [...byPath.values()].sort((a, b) => a.title.localeCompare(b.title))
+}
+
 /**
  * @param {object} deps
  * @param {import('./store.mjs').IssueStore} deps.store
  * @param {import('./dispatcher.mjs').Dispatcher} deps.dispatcher
- * @param {() => string[]} deps.projects known project paths
+ * @param {() => Array<string | { path: string, title?: string }>} deps.projects known projects
  * @param {{ admit(req: object): unknown }} deps.connection
  * @param {string} [deps.basePath]
  * @param {{ warn?: Function }} [deps.logger]
@@ -71,9 +95,7 @@ export function createHandler({ store, dispatcher, projects, connection, basePat
     const mutating = method !== 'GET'
 
     if (segments[0] === 'projects' && segments.length === 1 && !mutating) {
-      const known = new Set(projects())
-      for (const issue of store.list({ limit: 10000 })) known.add(issue.project)
-      return sendJson(res, 200, { projects: [...known].sort() })
+      return sendJson(res, 200, { projects: projectList(projects(), store.list({ limit: 10000 }).map(issue => issue.project)) })
     }
     if (segments[0] === 'issues' && segments.length === 1) {
       if (method === 'GET') {
@@ -88,9 +110,8 @@ export function createHandler({ store, dispatcher, projects, connection, basePat
       if (method === 'POST') {
         const body = await readJson(req)
         const project = typeof body.project === 'string' ? body.project : ''
-        if (!projects().includes(project) && !store.list({ project, limit: 1 }).length) {
-          throw new IssueError('invalid-input', 'unknown project')
-        }
+        const known = projectList(projects(), []).some(info => info.path === project)
+        if (!known && !isDirectory(project)) throw new IssueError('invalid-input', 'unknown project: pass a known project or an existing absolute directory')
         const issue = await store.create({
           project,
           title: body.title,

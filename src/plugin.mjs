@@ -135,6 +135,14 @@ export default class IssuesService extends Service {
     await this.initialized
   }
 
+  /** Projects with their display titles. */
+  listProjectInfo() {
+    const paths = new Set(this.listProjects())
+    return this.ctx.workspaceRegistry.list()
+      .filter(workspace => paths.has(workspace.path))
+      .map(workspace => ({ path: workspace.path, title: String(workspace.title || path.basename(workspace.path)) }))
+  }
+
   /** Workspaces that are real projects (worktrees created for issues are hidden). */
   listProjects() {
     const hidden = new Set((this.store?.list({ limit: 100000 }) ?? [])

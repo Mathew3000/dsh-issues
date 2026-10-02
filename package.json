@@ -8,7 +8,8 @@
   "files": [
     "src",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "client.js"
   ],
   "scripts": {
     "test": "node --test \"test/*.test.mjs\""
@@ -16,11 +17,19 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   },
   "exports": {
     ".": "./src/plugin.mjs",
     "./http": "./src/http-plugin.mjs",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": "./client.js"
   }
 }

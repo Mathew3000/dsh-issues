@@ -66,7 +66,7 @@ test('issues can be created, listed, edited, commented and cancelled', async () 
   assert.equal(done.json().issue.status, 'cancelled')
   assert.deepEqual(cancelled, [id])
   const projects = (await call('GET', '/dsh-issues/api/projects')).json()
-  assert.deepEqual(projects.projects, ['/work/app'])
+  assert.deepEqual(projects.projects, [{ path: '/work/app', title: 'app' }])
 })
 
 test('errors map to status codes and bad input is refused', async () => {
