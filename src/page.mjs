@@ -7,11 +7,12 @@ const SCRIPT = `'use strict';\n${read('markdown.cjs')}\n${read('app.cjs')}`
 
 /**
  * @param {string} nonce per-response CSP nonce
+ * @param {{ embedded?: boolean }} [options] `embedded`: the page runs inside the harness window and drops its own chrome
  * @returns {string} HTML document
  */
-export function renderPage(nonce) {
+export function renderPage(nonce, { embedded = false } = {}) {
   return `<!doctype html>
-<html lang="en">
+<html lang="en"${embedded ? ' data-embedded' : ''}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

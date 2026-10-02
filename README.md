@@ -28,7 +28,7 @@ open ──► in_progress ──► needs_review ──► done
 - Restart-safe: interrupted issues are re-attached and their goals re-armed.
 - Model tools for any session: `issue_create`, `issue_list`, `issue_get`, `issue_update`,
   `issue_comment`, `issue_dispatch`. A worker session may only read and comment on its own issue.
-- A web page at `/dsh-issues/` with a status-filtered list, a full-size **New issue** dialog (press `N`), Markdown in descriptions and comments (with Write/Preview), accept/reopen/cancel and comments, plus an **Issues** link in the header of every session in the main UI. Markdown is rendered safely: no raw HTML, only http(s)/mailto links, no remote images.
+- A web page at `/dsh-issues/` with a status-filtered list, a full-size **New issue** dialog (press `N`), Markdown in descriptions and comments (with Write/Preview), accept/reopen/cancel and comments, and an **Issues** entry in the harness sidebar, below *Plugins* and *Automation tasks*, that opens the tracker inside the harness window in the harness theme (light/dark follows the harness setting). The same page also works on its own at `/dsh-issues/`. Markdown is rendered safely: no raw HTML, only http(s)/mailto links, no remote images.
 
 You review the result in the issue's worktree/branch and the linked session, then set the issue to *done*
 (or reopen it with a comment, which sends it round again).

@@ -85,9 +85,9 @@ export function createHandler({ store, dispatcher, projects, defaults = () => ({
       if (method !== 'GET' && method !== 'HEAD') return send(res, 405, 'method not allowed')
       if (rest === '' ) return send(res, 308, '', { location: `${basePath}/` })
       const nonce = randomBytes(16).toString('base64')
-      return send(res, 200, renderPage(nonce), {
+      return send(res, 200, renderPage(nonce, { embedded: url.searchParams.get('embed') === '1' }), {
         'content-type': 'text/html; charset=utf-8',
-        'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+        'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`,
         'referrer-policy': 'no-referrer',
       })
     }

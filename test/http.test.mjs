@@ -46,6 +46,10 @@ test('the page is served with a nonce based CSP', async () => {
   const nonce = /nonce-([A-Za-z0-9+/=]+)/.exec(page.headers['content-security-policy'])[1]
   assert.ok(page.body.includes(`nonce="${nonce}"`))
   assert.match(page.headers['content-security-policy'], /default-src 'none'/)
+  // the harness window embeds the page, nobody else may
+  assert.match(page.headers['content-security-policy'], /frame-ancestors 'self'/)
+  assert.ok(!/<html[^>]*data-embedded/.test(page.body))
+  assert.match((await call('GET', '/dsh-issues/?embed=1')).body, /<html[^>]*data-embedded/)
 })
 
 test('issues can be created, listed, edited, commented and cancelled', async () => {
