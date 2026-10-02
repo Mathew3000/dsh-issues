@@ -27,10 +27,29 @@ export async function git(args, { cwd, timeout = 60_000 } = {}) {
  * @returns {Promise<string | undefined>} undefined when `dir` is not inside a git work tree
  */
 export async function repoRoot(dir) {
+  return (await inspectRepo(dir)).root
+}
+
+/**
+ * Like {@link repoRoot} but tells why a directory is not usable.
+ * `notRepo` is true only when git ran and said the directory is not in a work tree;
+ * every other failure (git missing, "dubious ownership", permissions) is an `error`.
+ * @returns {Promise<{ root: string } | { notRepo: true } | { error: string }>}
+ */
+export async function inspectRepo(dir) {
+  if (!existsSync(dir)) return { error: `${dir} does not exist` }
   try {
-    return path.resolve(await git(['rev-parse', '--show-toplevel'], { cwd: dir }))
-  } catch {
-    return undefined
+    return { root: path.resolve(await git(['rev-parse', '--show-toplevel'], { cwd: dir })) }
+  } catch (error) {
+    const stderr = String(error?.stderr ?? '').trim()
+    if (error?.code === 'ENOENT' && error?.syscall?.includes('spawn')) {
+      return { error: 'git could not be started (is git installed and on the PATH of the process running dsh?)' }
+    }
+    if (/not a git repository/i.test(stderr)) return { notRepo: true }
+    if (/dubious ownership|safe\.directory/i.test(stderr)) {
+      return { error: `git refuses this folder (dubious ownership). Run: git config --global --add safe.directory "${dir.replaceAll('\\', '/')}"` }
+    }
+    return { error: stderr || String(error?.message ?? error) }
   }
 }
 

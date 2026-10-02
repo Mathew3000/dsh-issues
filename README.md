@@ -78,7 +78,7 @@ To change settings, override the row in your profile's `cordis.patch.yml` (see b
 | `agentPreset` | `standard` | agent preset for worker sessions |
 | `permissionPreset` | `workspace-write` | permission preset; **asks** before actions outside the sandbox, so unattended runs stall until you answer. `danger-full-access` never asks – use only in a throwaway environment |
 | `maxConcurrent` / `maxPerProject` | 2 / 1 | parallel sessions overall / per project |
-| `isolation` | `auto` | `auto` = worktree for git projects, in place otherwise; `worktree`; `none` |
+| `isolation` | `worktree` | `worktree` = every issue gets its own git worktree and branch, and an issue is blocked (with the git error) if that is impossible; `auto` = worktree for git projects, in place (no branch, one issue at a time) for non-git folders; `none` = always in place |
 | `worktreeRoot` | next to the repo in `.dsh-worktrees/<repo>/` | where worktrees go |
 | `baseRef` | `HEAD` | what new issue branches start from |
 | `maxGoalRounds` | 64 | round cap of the goal |

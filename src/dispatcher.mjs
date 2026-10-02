@@ -10,7 +10,7 @@ import { projectKey } from './store.mjs'
 export const DEFAULTS = Object.freeze({
   maxConcurrent: 2,
   maxPerProject: 1,
-  isolation: 'auto',
+  isolation: 'worktree',
   maxGoalRounds: 64,
   maxAttempts: 3,
   completeStatus: 'needs_review',
@@ -107,13 +107,20 @@ export class Dispatcher {
   }
 
   async #plan(issue) {
-    const repo = await this.#git.repoRoot(issue.project)
     const { isolation } = this.#config
-    if (isolation === 'worktree' && repo === undefined) {
-      throw new Error(`isolation is "worktree" but ${issue.project} is not inside a git repository`)
+    if (isolation === 'none') return { mode: 'none', relative: '', reason: 'isolation is set to "none"' }
+    const found = this.#git.inspectRepo !== undefined
+      ? await this.#git.inspectRepo(issue.project)
+      : { root: await this.#git.repoRoot(issue.project) }
+    if (found.error !== undefined) throw new Error(found.error)
+    const repo = found.root
+    if (repo === undefined) {
+      if (isolation === 'worktree') {
+        throw new Error(`isolation is "worktree" but ${issue.project} is not inside a git repository`)
+      }
+      return { mode: 'none', relative: '', reason: `${issue.project} is not inside a git repository` }
     }
-    const mode = isolation === 'none' || repo === undefined ? 'none' : 'worktree'
-    return { mode, repo, relative: repo === undefined ? '' : path.relative(repo, path.resolve(issue.project)) }
+    return { mode: 'worktree', repo, relative: path.relative(repo, path.resolve(issue.project)) }
   }
 
   async #block(issue, code, message) {
@@ -157,7 +164,9 @@ export class Dispatcher {
       await this.#store.attach(issue.id, { sessionId: started.sessionId, goalId: started.goalId, branch, worktreePath, baseBranch })
       await this.#store.addComment(issue.id, {
         author: 'system',
-        text: `Session ${started.sessionId} started${branch === undefined ? '' : ` on branch ${branch}`}.`,
+        text: branch === undefined
+          ? `Session ${started.sessionId} started IN PLACE in ${workdir} without a branch or worktree (${plan.reason}); issues of this project run one at a time.`
+          : `Session ${started.sessionId} started on branch ${branch} in its own worktree ${worktreePath}.`,
       })
       this.#log.info?.(`dsh-issues: ${issue.id} started in session ${started.sessionId}`)
       return true

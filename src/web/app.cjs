@@ -67,6 +67,7 @@
     var known = state.projects.filter(function (p) { return p.path === path; })[0];
     return known ? known.title : String(path).replace(/[\\/]+$/, '').split(/[\\/]/).pop();
   }
+  function inPlace(issue) { return issue.sessionId && !issue.branch ? h('span', { class: 'badge m-skipped', title: 'No branch or worktree: the agent works directly in the project folder' }, 'in place') : null; }
   function badge(status) { return h('span', { class: 'badge s-' + status }, LABEL[status] || status); }
   var MERGE_LABEL = { running: 'Merging', merged: 'Merged', conflict: 'Merge conflict', failed: 'Merge failed', skipped: 'Merge skipped' };
   function mergeBadge(issue) {
@@ -199,7 +200,7 @@
     replace(list, items.map(function (issue) {
       return h('button', { type: 'button', class: 'row' + (issue.id === state.selected ? ' sel' : ''), onclick: function () { select(issue.id); } },
         h('div', { class: 't' }, h('span', { class: 'id' }, issue.id), h('span', {}, issue.title)),
-        h('div', { class: 'm' }, badge(issue.status), mergeBadge(issue),
+        h('div', { class: 'm' }, badge(issue.status), mergeBadge(issue), inPlace(issue),
           issue.priority === 'high' ? h('span', { class: 'prio-high' }, 'High') : null,
           state.project ? null : h('span', {}, projectTitle(issue.project)),
           h('span', { title: abs(issue.updatedAt) }, ago(issue.updatedAt))));
@@ -249,6 +250,7 @@
 
     var work = [];
     if (issue.branch) work.push(fact('Branch', issue.branch));
+    else if (issue.sessionId) work.push(fact('Isolation', 'none: works directly in the project folder, no branch'));
     if (issue.worktreePath) work.push(fact('Worktree', issue.worktreePath));
     if (issue.sessionId) work.push(fact('Session', issue.sessionId));
     if (issue.attempts) work.push(fact('Attempts', String(issue.attempts)));

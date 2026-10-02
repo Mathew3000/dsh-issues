@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'no
 import os from 'node:os'
 import path from 'node:path'
 import { after, before, test } from 'node:test'
-import { branchName, ensureWorktree, repoRoot, slugify } from '../src/git.mjs'
+import { branchName, ensureWorktree, inspectRepo, repoRoot, slugify } from '../src/git.mjs'
 
 let root
 let repo
@@ -31,6 +31,12 @@ test('slugify and branchName produce safe branch names', () => {
   assert.equal(slugify('###'), 'work')
   assert.equal(slugify('x'.repeat(100)).length, 40)
   assert.equal(branchName({ id: 'ISS-12', title: 'Fix login' }), 'issue/iss-12-fix-login')
+})
+
+test('inspectRepo separates "not a repository" from real failures', async () => {
+  assert.deepEqual(await inspectRepo(repo), { root: repo })
+  assert.deepEqual(await inspectRepo(root), { notRepo: true })
+  assert.match((await inspectRepo(path.join(root, 'missing'))).error, /does not exist/)
 })
 
 test('repoRoot finds the top level and returns undefined outside a repository', async () => {

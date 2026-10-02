@@ -13,7 +13,7 @@
         permissionPreset: workspace-write
         maxConcurrent: 2
         maxPerProject: 1
-        isolation: auto
+        isolation: worktree
         autoStart: true
         # Auto-merge: once an issue is accepted, a small merge agent merges its
         # branch into the base branch. This is the default of the checkbox on new

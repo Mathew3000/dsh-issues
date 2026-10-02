@@ -12,7 +12,7 @@ function memoryTable() {
   return { entries: () => map.entries(), async put(key, value) { map.set(key, value) } }
 }
 
-function setup({ config = {}, startImpl, resumeImpl, repos = { [REPO]: REPO } } = {}) {
+function setup({ config = {}, startImpl, resumeImpl, inspect, repos = { [REPO]: REPO } } = {}) {
   const store = new IssueStore({ table: memoryTable() })
   const calls = { start: [], halt: [], resume: [], worktree: [] }
   let sessionCounter = 0
@@ -31,6 +31,11 @@ function setup({ config = {}, startImpl, resumeImpl, repos = { [REPO]: REPO } } 
   }
   const git = {
     async repoRoot(dir) { return repos[path.resolve(dir)] },
+    async inspectRepo(dir) {
+      if (inspect) return inspect(dir)
+      const root = repos[path.resolve(dir)]
+      return root === undefined ? { notRepo: true } : { root }
+    },
     async ensureWorktree({ repo, issue }) {
       calls.worktree.push(issue.id)
       return { path: path.join(repo, '..', '.wt', issue.id.toLowerCase()), branch: `issue/${issue.id.toLowerCase()}-x` }
@@ -76,7 +81,7 @@ test('worktree sessions run inside the worktree and keep the project subdirector
 })
 
 test('non-git projects run in place and never in parallel', async () => {
-  const { store, dispatcher, calls } = setup({ config: { maxPerProject: 5 }, repos: {} })
+  const { store, dispatcher, calls } = setup({ config: { isolation: 'auto', maxPerProject: 5 }, repos: {} })
   await store.create({ project: PLAIN, title: 'a' })
   await store.create({ project: PLAIN, title: 'b' })
   await dispatcher.tick()
@@ -84,6 +89,30 @@ test('non-git projects run in place and never in parallel', async () => {
   assert.equal(calls.start[0].workspacePath, PLAIN)
   assert.equal(calls.worktree.length, 0)
   assert.match(calls.start[0].prompt, /directly in the project checkout/)
+})
+
+test('in-place runs say so in the issue', async () => {
+  const { store, dispatcher } = setup({ config: { isolation: 'auto' }, repos: {} })
+  await store.create({ project: PLAIN, title: 'a' })
+  await dispatcher.tick()
+  assert.match(store.get('ISS-1').comments.at(-1).text, /IN PLACE .*not inside a git repository/)
+})
+
+test('auto does not fall back to in-place when git itself fails', async () => {
+  const { store, dispatcher, calls } = setup({ config: { isolation: 'auto' }, repos: {}, inspect: () => ({ error: 'dubious ownership' }) })
+  await store.create({ project: PLAIN, title: 'a' })
+  await dispatcher.tick()
+  assert.equal(calls.start.length, 0)
+  assert.equal(store.get('ISS-1').status, 'blocked')
+  assert.match(store.get('ISS-1').blocked?.message ?? JSON.stringify(store.get('ISS-1')), /dubious ownership/)
+})
+
+test('the default isolation is a worktree per issue and never runs on the main checkout', async () => {
+  const { store, dispatcher, calls } = setup({ repos: {} })
+  await store.create({ project: PLAIN, title: 'a' })
+  await dispatcher.tick()
+  assert.equal(calls.start.length, 0)
+  assert.equal(store.get('ISS-1').status, 'blocked')
 })
 
 test('isolation "worktree" blocks issues of non-git projects', async () => {
