@@ -87,6 +87,8 @@ test('plugin wires storage, tools, dispatch and goal events', { skip: harness ==
     assert.equal(calls.followups.length, 1)
     assert.equal(calls.created[0].meta.cwd, issue.worktreePath)
     assert.deepEqual(ctx.issues.listProjects(), [repo])
+    assert.deepEqual(ctx.issues.defaults(), { autoMerge: false })
+    assert.equal(ctx.issues.listProjectInfo()[0].path, repo)
 
     ctx.emit('goal/changed', { agent, change: { operation: 'complete', ref: {}, goal: { phase: 'complete', roundsStarted: 3 } } })
     ctx.emit('session/event', agent.session, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Fixed it.' }] } } })

@@ -57,11 +57,12 @@ export default class IssuesService extends Service {
   dispatcher
   /** @type {MergeCoordinator | undefined} */
   merges
-  #config
+  /** Plain property: cordis calls service methods through a proxy, where `#private` fields are not reachable. */
+  config
 
   constructor(ctx, config) {
     super(ctx, 'issues')
-    this.#config = config
+    this.config = config
     const log = ctx.logger
 
     // Events can arrive before storage is open; they are no-ops until then.
@@ -175,7 +176,7 @@ export default class IssuesService extends Service {
 
   /** Defaults the web page applies to new issues. */
   defaults() {
-    return { autoMerge: this.#config.autoMerge === true }
+    return { autoMerge: this.config.autoMerge === true }
   }
 
   /** Projects with their display titles. */
