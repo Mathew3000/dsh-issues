@@ -93,6 +93,13 @@ To change settings, override the row in your profile's `cordis.patch.yml` (see b
 | `forgetWorkspaces` | `true` | remove the harness workspace entries of those worktrees; the session logs are kept |
 | `maxMergeRounds` / `maxConcurrentMerges` | 24 / 2 | goal round cap of a merge agent / parallel merges (one per project) |
 
+### Settings page
+
+Every option above is also editable in the harness UI: open **Plugins → dsh-issues**
+and use the form under the description. Changes are written to your profile and apply
+immediately (all options are live): new work uses the new values, while agents already
+running keep the settings they started with.
+
 ## Cleanup
 
 Every worktree the tracker creates (one per issue, one per merge) also shows up as a workspace in the harness. A background sweep removes both once they are no longer needed:

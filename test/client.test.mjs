@@ -7,11 +7,13 @@ import { test } from 'node:test'
 function load() {
   const registered = []
   let module
-  const React = { createElement: (type, props, ...children) => ({ type, props, children }), useRef: () => ({ current: null }), useEffect: () => undefined }
+  const React = { createElement: (type, props, ...children) => ({ type, props, children }), useRef: () => ({ current: null }), useEffect: () => undefined, useState: v => [v, () => undefined], useSyncExternalStore: (_sub, get) => get() }
   const sandbox = { window: { __ModuleLoader__: { load: entry => { module = entry } } } }
   vm.runInNewContext(readFileSync(new URL('../client.js', import.meta.url), 'utf8'), sandbox)
   const exported = module.factory(name => { assert.equal(name, 'react'); return React })
-  const ctx = { slots: { inject: (_name, fn) => fn(), register: (options, component) => { registered.push({ options, component }) } } }
+  const form = { subscribe: () => () => undefined, getSnapshot: () => ({ status: 'ready', writable: true, value: { maxConcurrent: 2, autoMerge: true } }), set: async () => true }
+  const forms = []
+  const ctx = { configForms: { get: id => { forms.push(id); return form } }, slots: { inject: (_name, fn) => fn(), register: (options, component) => { registered.push({ options, component }) } } }
   exported.apply(ctx)
   return { module, exported, registered }
 }
@@ -19,14 +21,14 @@ function load() {
 test('the client registers a sidebar entry below Plugins and Automation tasks and a page for it', () => {
   const { module, exported, registered } = load()
   assert.equal(module.id, 'dsh-issues')
-  assert.deepEqual([...exported.inject], ['slots'])
+  assert.deepEqual([...exported.inject], ['slots', 'configForms'])
   const entry = registered.find(item => item.options.name === 'sidebar.panellist')
   const page = registered.find(item => item.options.name === 'main')
   assert.equal(entry.options.id, 'dsh-issues')
   assert.equal(entry.options.label, 'Issues')
   assert.ok(entry.options.order > 10, 'after Plugins (0) and Automation tasks (10)')
   assert.equal(page.options.key, entry.options.id, 'the entry opens the page with the same id')
-  assert.equal(registered.length, 2)
+  assert.equal(registered.length, 3)
 })
 
 test('the page embeds the same-origin tracker in embed mode, the icon takes the requested size', () => {
@@ -37,4 +39,12 @@ test('the page embeds the same-origin tracker in embed mode, the icon takes the 
   assert.equal(frame.props.src, '/dsh-issues/?embed=1')
   const icon = registered.find(item => item.options.name === 'sidebar.panellist').component({ size: 18 })
   assert.equal(icon.props.width, 18)
+})
+
+test('the plugin page gets a settings form bound to the dsh-issues namespace', () => {
+  const { registered } = load()
+  const entry = registered.find(item => item.options.name === 'plugins.bundle.config')
+  assert.equal(entry.options.key, 'dsh-issues')
+  const tree = JSON.stringify(entry.component())
+  for (const label of ['Max concurrent agents', 'Auto-merge accepted issues', 'Isolation', 'Poll interval']) assert.ok(tree.includes(label), label)
 })

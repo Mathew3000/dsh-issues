@@ -45,6 +45,11 @@ export class Dispatcher {
    * @param {Partial<typeof DEFAULTS> & { worktreeRoot?: string, baseRef?: string }} [options.config]
    * @param {{ info?: Function, warn?: Function }} [options.logger]
    */
+  /** Replace the settings (an edit on the settings page); work in flight keeps what it started with. */
+  setConfig(config = {}) {
+    this.#config = { ...DEFAULTS, ...config }
+  }
+
   constructor({ store, sessions, git, config = {}, logger = {} }) {
     this.#store = store
     this.#sessions = sessions

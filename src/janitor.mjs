@@ -36,6 +36,11 @@ export class Janitor {
    * @param {Partial<typeof JANITOR_DEFAULTS>} [options.config]
    * @param {{ info?: Function, warn?: Function }} [options.logger]
    */
+  /** Replace the settings (an edit on the settings page); work in flight keeps what it started with. */
+  setConfig(config = {}) {
+    this.#config = { ...JANITOR_DEFAULTS, ...config }
+  }
+
   constructor({ store, git, workspaces, config = {}, logger = {} }) {
     this.#store = store
     this.#git = git

@@ -20,6 +20,17 @@ const { defineTool } = toolkit
 
 const WORKTREE_DIR = '.dsh-worktrees'
 
+/** A configuration value with its live wrapper (fields marked `.volatile()`) resolved. */
+const unwrap = value => (value !== null && typeof value === 'object' && typeof value.get === 'function' ? value.get() : value)
+
+/** Plain snapshot of the current configuration; settings edits change it while the plugin runs. */
+export function currentConfig(config) {
+  return Object.fromEntries(Object.keys(config).map(key => [key, unwrap(config[key])]))
+}
+
+/** The part of the configuration the dispatcher and merge coordinator take. */
+const workerConfig = config => ({ ...config, worktreeRoot: config.worktreeRoot || undefined })
+
 const issueDomain = defineDomain({
   name: 'issues',
   version: 1,
@@ -33,25 +44,25 @@ export default class IssuesService extends Service {
   ]
 
   static Config = z.object({
-    agentPreset: z.string().default('standard'),
-    permissionPreset: z.string().default('workspace-write'),
-    maxConcurrent: z.number().step(1).min(1).max(16).default(DEFAULTS.maxConcurrent),
-    maxPerProject: z.number().step(1).min(1).max(16).default(DEFAULTS.maxPerProject),
-    isolation: z.union(['auto', 'worktree', 'none']).default(DEFAULTS.isolation),
-    worktreeRoot: z.string().default(''),
-    baseRef: z.string().default('HEAD'),
-    maxGoalRounds: z.number().step(1).min(1).max(1000).default(DEFAULTS.maxGoalRounds),
-    maxAttempts: z.number().step(1).min(1).max(20).default(DEFAULTS.maxAttempts),
-    completeStatus: z.union(['needs_review', 'done']).default(DEFAULTS.completeStatus),
-    autoStart: z.boolean().default(true),
-    resumeOnStart: z.boolean().default(DEFAULTS.resumeOnStart),
-    pollSeconds: z.number().step(1).min(0).max(86_400).default(60),
-    autoMerge: z.boolean().default(false),
-    cleanupAfterMerge: z.boolean().default(MERGE_DEFAULTS.cleanupAfterMerge),
-    cleanupOnClose: z.boolean().default(JANITOR_DEFAULTS.cleanupOnClose),
-    forgetWorkspaces: z.boolean().default(JANITOR_DEFAULTS.forgetWorkspaces),
-    maxMergeRounds: z.number().step(1).min(1).max(200).default(MERGE_DEFAULTS.maxMergeRounds),
-    maxConcurrentMerges: z.number().step(1).min(1).max(8).default(MERGE_DEFAULTS.maxConcurrentMerges),
+    agentPreset: z.string().default('standard').volatile(),
+    permissionPreset: z.string().default('workspace-write').volatile(),
+    maxConcurrent: z.number().step(1).min(1).max(16).default(DEFAULTS.maxConcurrent).volatile(),
+    maxPerProject: z.number().step(1).min(1).max(16).default(DEFAULTS.maxPerProject).volatile(),
+    isolation: z.union(['auto', 'worktree', 'none']).default(DEFAULTS.isolation).volatile(),
+    worktreeRoot: z.string().default('').volatile(),
+    baseRef: z.string().default('HEAD').volatile(),
+    maxGoalRounds: z.number().step(1).min(1).max(1000).default(DEFAULTS.maxGoalRounds).volatile(),
+    maxAttempts: z.number().step(1).min(1).max(20).default(DEFAULTS.maxAttempts).volatile(),
+    completeStatus: z.union(['needs_review', 'done']).default(DEFAULTS.completeStatus).volatile(),
+    autoStart: z.boolean().default(true).volatile(),
+    resumeOnStart: z.boolean().default(DEFAULTS.resumeOnStart).volatile(),
+    pollSeconds: z.number().step(1).min(0).max(86_400).default(60).volatile(),
+    autoMerge: z.boolean().default(false).volatile(),
+    cleanupAfterMerge: z.boolean().default(MERGE_DEFAULTS.cleanupAfterMerge).volatile(),
+    cleanupOnClose: z.boolean().default(JANITOR_DEFAULTS.cleanupOnClose).volatile(),
+    forgetWorkspaces: z.boolean().default(JANITOR_DEFAULTS.forgetWorkspaces).volatile(),
+    maxMergeRounds: z.number().step(1).min(1).max(200).default(MERGE_DEFAULTS.maxMergeRounds).volatile(),
+    maxConcurrentMerges: z.number().step(1).min(1).max(8).default(MERGE_DEFAULTS.maxConcurrentMerges).volatile(),
   })
 
   /** @type {IssueStore | undefined} */
@@ -69,6 +80,8 @@ export default class IssuesService extends Service {
     super(ctx, 'issues')
     this.config = config
     const log = ctx.logger
+    /** Reads through to the live values, so the sessions adapter sees edited presets. */
+    const liveConfig = new Proxy({}, { get: (_, key) => unwrap(config[key]) })
 
     // Events can arrive before storage is open; they are no-ops until then.
     ctx.on('goal/changed', ({ agent, change }) => {
@@ -91,32 +104,32 @@ export default class IssuesService extends Service {
     })
 
     this.initialized = ctx.effect(async () => {
-      ctx.permissionPresets.resolve(config.permissionPreset)
-      await ctx.agentPresets.resolve(config.agentPreset)
+      ctx.permissionPresets.resolve(unwrap(config.permissionPreset))
+      await ctx.agentPresets.resolve(unwrap(config.agentPreset))
       const domain = await ctx.storageDomain.open(issueDomain)
       let timer
       try {
         const store = new IssueStore({ table: domain.table('issues') })
         const dispatcher = new Dispatcher({
           store,
-          sessions: createSessionsAdapter(ctx, config),
+          sessions: createSessionsAdapter(ctx, liveConfig),
           git: gitOps,
-          config: { ...config, worktreeRoot: config.worktreeRoot || undefined },
+          config: workerConfig(currentConfig(config)),
           logger: log,
         })
-        const sessions = createSessionsAdapter(ctx, config)
+        const sessions = createSessionsAdapter(ctx, liveConfig)
         const merges = new MergeCoordinator({
           store,
           sessions,
           git: gitOps,
-          config: { ...config, worktreeRoot: config.worktreeRoot || undefined },
+          config: workerConfig(currentConfig(config)),
           logger: log,
         })
         const janitor = new Janitor({
           store,
           git: gitOps,
           workspaces: workspaceAdapter(ctx),
-          config,
+          config: currentConfig(config),
           logger: log,
         })
         this.janitor = janitor
@@ -125,7 +138,7 @@ export default class IssuesService extends Service {
         this.merges = merges
 
         const autoStart = () => {
-          if (!config.autoStart) return
+          if (!unwrap(config.autoStart)) return
           void dispatcher.tick()
           void merges.tick()
         }
@@ -139,10 +152,27 @@ export default class IssuesService extends Service {
           if (wantsMerge || finishedMerge) void merges.tick()
           if (['done', 'cancelled'].includes(issue.status) || finishedMerge) void janitor.sweep()
         })
-        if (config.pollSeconds > 0) {
-          timer = setInterval(() => { autoStart(); void janitor.sweep() }, config.pollSeconds * 1000)
-          timer.unref?.()
+        const startPolling = () => {
+          clearInterval(timer)
+          timer = undefined
+          const seconds = Number(unwrap(config.pollSeconds))
+          if (seconds > 0) {
+            timer = setInterval(() => { autoStart(); void janitor.sweep() }, seconds * 1000)
+            timer.unref?.()
+          }
         }
+        startPolling()
+        // Settings page edits: hand the new values to the running components.
+        const offSettings = ctx.on('loader/volatile-update', () => {
+          const next = currentConfig(config)
+          dispatcher.setConfig(workerConfig(next))
+          merges.setConfig(workerConfig(next))
+          janitor.setConfig(next)
+          startPolling()
+          autoStart()
+          void merges.tick()
+          void janitor.sweep()
+        })
         const disposers = createTools({
           defineTool,
           store,
@@ -154,6 +184,7 @@ export default class IssuesService extends Service {
 
         const cleanup = ctx.effect(() => async () => {
           clearInterval(timer)
+          offSettings()
           offChange()
           for (const dispose of disposers) dispose()
           await dispatcher.stop()
@@ -168,7 +199,7 @@ export default class IssuesService extends Service {
         // Pick up work that was interrupted by a restart, then anything waiting.
         void (async () => {
           try {
-            if (config.resumeOnStart) {
+            if (unwrap(config.resumeOnStart)) {
               await dispatcher.resumeInterrupted()
               await merges.resumeInterrupted()
             }
@@ -194,7 +225,7 @@ export default class IssuesService extends Service {
 
   /** Defaults the web page applies to new issues. */
   defaults() {
-    return { autoMerge: this.config.autoMerge === true }
+    return { autoMerge: unwrap(this.config.autoMerge) === true }
   }
 
   /** Projects with their display titles. */
